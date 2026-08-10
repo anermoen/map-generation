@@ -1,0 +1,5 @@
+__pycache__/
+*.pyc
+
+# Generated outputs (reproducible via download_images.py, needs a personal token)
+output/
