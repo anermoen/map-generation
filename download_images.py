@@ -60,11 +60,13 @@ Usage
     python3 download_images.py --token <TOKEN> --years 2006 2025
     python3 download_images.py --token <TOKEN> --kommune Etnedal --gnr 123 --bnr 9
 
-Output, in ./output/:
-  - "123-9_Etnedal_1958.tif", ...  one GeoTIFF per year, cropped to the
+Output, in ./123-9-Etnedal/ (a folder named after the property itself,
+"<gnr>-<bnr>-<kommune>" - see property.py's property_code() - so the
+folder/filenames alone establish which property they're for):
+  - "123-9-Etnedal_1958.tif", ...  one GeoTIFF per year, cropped to the
     property's exact bounding box, tagged with photo date/source/etc.
-  - "123-9_Etnedal_boundary.geojson"  property outline in EPSG:4326
-  - "123-9_Etnedal_manifest.json"     per-image metadata for later use
+  - "123-9-Etnedal_boundary.geojson"  property outline in EPSG:4326
+  - "123-9-Etnedal_manifest.json"     per-image metadata for later use
 """
 
 import argparse
@@ -246,7 +248,10 @@ def main():
     ap.add_argument("--pad", type=float, default=0.0,
                      help="fractional bbox padding beyond the property's own extent "
                           "(default 0.0: crop tightly to the property)")
-    ap.add_argument("--outdir", default="output")
+    ap.add_argument("--outdir", default=None,
+                     help="default: a folder named after the property itself, "
+                          "'<gnr>-<bnr>-<kommune>' (e.g. 123-9-Etnedal) - see property.py's "
+                          "property_code()")
     ap.add_argument("--layer-field", choices=["name", "id"], default="name",
                      help="what to send as WMS LAYERS - project name or nib_project_id "
                           "(verify with --list-layers first if downloads fail)")
@@ -269,8 +274,9 @@ def main():
     bbox = property_bbox(prop.polygon, args.pad)
     projects = find_covering_projects(prop.polygon)
 
-    os.makedirs(args.outdir, exist_ok=True)
-    basename = f"{args.gnr}-{args.bnr}_{args.kommune}"
+    basename = prop.code
+    outdir = args.outdir or basename
+    os.makedirs(outdir, exist_ok=True)
     records = []
     for year in args.years:
         project = best_covering_project(projects, year)
@@ -279,7 +285,7 @@ def main():
                   f"(see imagery_search.py output for near-misses)")
             continue
         filename = f"{basename}_{year}.tif"
-        out_path = os.path.join(args.outdir, filename)
+        out_path = os.path.join(outdir, filename)
         print(f"{year}: fetching {project.name!r} ({project.pixel_size_m}m/px, "
               f"photo date {project.photo_date}) -> {out_path}")
         try:
@@ -301,8 +307,8 @@ def main():
                   f"server expects for {project.name!r})")
 
     if records:
-        boundary_path = write_boundary_geojson(prop, args.outdir, basename)
-        manifest_path = write_manifest(prop, records, bbox, args.outdir, basename)
+        boundary_path = write_boundary_geojson(prop, outdir, basename)
+        manifest_path = write_manifest(prop, records, bbox, outdir, basename)
         print(f"\nWrote {boundary_path}")
         print(f"Wrote {manifest_path}")
 

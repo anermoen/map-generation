@@ -33,6 +33,12 @@ Usage
 -----
     python3 property.py Etnedal 123 9
 
+Fetches the boundary, prints a summary, and saves the polygon to
+property_polygon.csv - a real CSV, opens directly as a spreadsheet in
+Numbers/Excel (see write_polygon_csv) - in the property's own output
+folder (default: "<gnr>-<bnr>-<kommune>", e.g. 123-9-Etnedal - see
+property_code(); pass --outdir to override).
+
 or as a library:
 
     from property import fetch_property
@@ -40,9 +46,17 @@ or as a library:
     prop.polygon        # shapely Polygon/MultiPolygon, EPSG:25833
     prop.kommunenavn
     prop.matrikkelnummer
+
+read_polygon_csv(path) parses a saved property_polygon.csv back into the
+same shapely geometry, if you need to work from the cached file directly
+rather than re-fetching (e.g. during a Kartverket WFS outage, or to save
+a redundant network round trip if you already ran property.py once for
+the same property in the same session).
 """
 
-import sys
+import argparse
+import csv
+import os
 from dataclasses import dataclass
 from xml.etree import ElementTree
 
@@ -109,6 +123,22 @@ class Property:
     bruksnummer: int
     matrikkelnummer: str
     polygon: object   # shapely geometry, EPSG:25833
+
+    @property
+    def code(self):
+        return property_code(self.gardsnummer, self.bruksnummer, self.kommunenavn)
+
+
+def property_code(gardsnummer, bruksnummer, kommune_navn):
+    """The property identifier used consistently as both the per-property
+    output folder name and the prefix on every file inside it (e.g.
+    "123-9-Etnedal") - so the folder/filenames alone establish which
+    property they belong to, without needing to open a manifest. Uses
+    the kommune name exactly as given/resolved (not the kommunenummer),
+    matching how a human would refer to the property, and matching the
+    naming convention used for manually-captured screenshots dropped
+    into that folder (<gardsnummer>-<bruksnummer>-<kommune>-<year>.png)."""
+    return f"{gardsnummer}-{bruksnummer}-{kommune_navn}"
 
 
 def get_kommunenummer(kommune_navn):
@@ -181,17 +211,106 @@ def fetch_property(kommune_navn, gardsnummer, bruksnummer):
     )
 
 
+def _iter_polygon_parts(geometry):
+    """Yields each Polygon making up geometry - just itself for a plain
+    Polygon, or each part for a MultiPolygon (a Teig split into disjoint
+    patches, e.g. by a lake or an administrative boundary - see
+    _parse_teig_geometry)."""
+    if geometry.geom_type == "Polygon":
+        yield geometry
+    elif geometry.geom_type == "MultiPolygon":
+        yield from geometry.geoms
+    else:
+        raise ValueError(f"Unsupported geometry type: {geometry.geom_type}")
+
+
+def polygon_csv_path(outdir):
+    return os.path.join(outdir, "property_polygon.csv")
+
+
+def write_polygon_csv(prop, outdir):
+    """Write prop.polygon (EPSG:25833) to <outdir>/property_polygon.csv -
+    a real CSV (opens natively as a spreadsheet table in Numbers/Excel,
+    unlike a .dat file, which macOS has no default app for even though
+    the content is plain text): a few commented metadata lines, then one
+    header row and one data row per boundary point - columns part, ring,
+    easting, northing. "ring" is "exterior" or "interior_<j>" (a hole -
+    rare for a single cadastral parcel, but possible); "part" is 1 for a
+    plain Polygon, or the patch number for a MultiPolygon (a Teig split
+    into disjoint patches, e.g. by a lake or an administrative
+    boundary - see _parse_teig_geometry). This round-trips exactly -
+    read_polygon_csv parses it back into the same shapely geometry.
+    Returns the path written."""
+    os.makedirs(outdir, exist_ok=True)
+    path = polygon_csv_path(outdir)
+    parts = list(_iter_polygon_parts(prop.polygon))
+    with open(path, "w") as f:
+        f.write("# Property boundary polygon, from Kartverket's cadastre (property.py)\n")
+        f.write(f"# matrikkelnummer: {prop.matrikkelnummer}\n")
+        f.write(f"# kommune: {prop.kommunenavn} (kommunenummer {prop.kommunenummer})\n")
+        f.write("# crs: EPSG:25833 (ETRS89 / UTM zone 33N)\n")
+        f.write(f"# geometry_type: {prop.polygon.geom_type}\n")
+        f.write(f"# area_m2: {prop.polygon.area:.3f}\n")
+        f.write("part,ring,easting,northing\n")
+        for i, poly in enumerate(parts, start=1):
+            for x, y in poly.exterior.coords:
+                f.write(f"{i},exterior,{x:.3f},{y:.3f}\n")
+            for j, interior in enumerate(poly.interiors, start=1):
+                for x, y in interior.coords:
+                    f.write(f"{i},interior_{j},{x:.3f},{y:.3f}\n")
+    return path
+
+
+def read_polygon_csv(path):
+    """Parse a property_polygon.csv file (see write_polygon_csv) back
+    into a shapely Polygon/MultiPolygon in EPSG:25833 - the counterpart
+    to write_polygon_csv, so the file is a real cache, not just a
+    human-readable dump."""
+    parts = {}   # part index -> {"exterior": [...], "interiors": {j: [...]}}
+    with open(path, newline="") as f:
+        reader = csv.reader(row for row in f if not row.startswith("#"))
+        header = next(reader)   # part,ring,easting,northing
+        assert header == ["part", "ring", "easting", "northing"], \
+            f"unexpected property_polygon.csv header: {header}"
+        for part_s, ring, x_s, y_s in reader:
+            part_i = int(part_s)
+            parts.setdefault(part_i, {"exterior": [], "interiors": {}})
+            point = (float(x_s), float(y_s))
+            if ring == "exterior":
+                parts[part_i]["exterior"].append(point)
+            else:
+                j = int(ring.split("_")[1])
+                parts[part_i]["interiors"].setdefault(j, []).append(point)
+
+    polygons = []
+    for i in sorted(parts):
+        p = parts[i]
+        interiors = [p["interiors"][j] for j in sorted(p["interiors"])]
+        polygons.append(Polygon(p["exterior"], interiors))
+    return polygons[0] if len(polygons) == 1 else MultiPolygon(polygons)
+
+
 def main():
-    if len(sys.argv) != 4:
-        print("Usage: python3 property.py <kommune> <gardsnummer> <bruksnummer>")
-        sys.exit(1)
-    kommune, gnr, bnr = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
-    prop = fetch_property(kommune, gnr, bnr)
+    ap = argparse.ArgumentParser(
+        description="Fetch a cadastral property boundary and save it to property_polygon.dat.")
+    ap.add_argument("kommune")
+    ap.add_argument("gardsnummer", type=int)
+    ap.add_argument("bruksnummer", type=int)
+    ap.add_argument("--outdir", default=None,
+                     help="default: a folder named after the property itself, "
+                          "'<gnr>-<bnr>-<kommune>' (e.g. 123-9-Etnedal) - see property_code()")
+    args = ap.parse_args()
+
+    prop = fetch_property(args.kommune, args.gardsnummer, args.bruksnummer)
     print(f"Kommune:          {prop.kommunenavn} ({prop.kommunenummer})")
     print(f"Matrikkelnummer:  {prop.matrikkelnummer}")
     print(f"Geometry type:    {prop.polygon.geom_type}")
     print(f"Area:             {prop.polygon.area:,.0f} m^2")
     print(f"Bounds (EPSG:25833): {prop.polygon.bounds}")
+
+    outdir = args.outdir or prop.code
+    path = write_polygon_csv(prop, outdir)
+    print(f"Saved {path}")
 
 
 if __name__ == "__main__":

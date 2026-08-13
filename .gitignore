@@ -1,5 +1,9 @@
 __pycache__/
 *.pyc
+.DS_Store
 
-# Generated outputs (reproducible via download_images.py, needs a personal token)
-output/
+# Per-property output folders, named "<gnr>-<bnr>-<kommune>" (e.g.
+# 123-9-Etnedal) by property.py's property_code() - manually-captured
+# screenshots, georeferenced GeoTIFFs, overlays, and manifest.json are
+# all regenerable/re-droppable, so none of it is tracked.
+[0-9]*-[0-9]*-*/

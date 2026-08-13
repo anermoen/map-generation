@@ -7,18 +7,38 @@ across as many decades as coverage allows.
 ## Status
 
 Property boundary lookup and the coverage search are complete and
-verified working. Downloading actual image pixels needs a token tied to
-a personal GeoID account (see "Blocker" below) - `download_images.py` is
-written and its non-network logic (property/project lookup, bbox/
+verified working. Downloading actual image pixels via the proper WMS
+needs a GeoID-account token (see "Blocker" below) - `download_images.py`
+is written and its non-network logic (property/project lookup, bbox/
 resolution math, gap-year skipping) is verified, but the real WMS
 GetMap call could only be confirmed to *reach* the server correctly
 (fails with an auth error using a fake token, as expected); it needs a
 real token, run from your own machine, to confirm end-to-end.
 
 **Decisions made**: skip 2017-2024 (no dedicated aerial coverage - see
-below) rather than substitute the far coarser satellite mosaic; you'll
-run the download step yourself with your own GeoID token rather than
-handing one to this sandboxed environment.
+below) rather than substitute the far coarser satellite mosaic. All
+three routes to a GeoID token (Norge digitalt membership, a paid
+data-access agreement, or ordering specific historical photos directly
+from Kartverket's archive) were assessed and set aside for now - none
+make sense at this project's current pre-client, idea-testing stage (no
+budget for direct costs, no client yet to justify formal membership).
+Kartverket's own browser viewer (norgeibilder.no) is free to use for
+anyone, though, and already shows the eiendomsgrenser (property
+boundary) drawn on each historical photo - `georeference_screenshot.py`
+uses that boundary's already-known real-world coordinates to
+georeference a screenshot of it directly, sidestepping the token
+requirement entirely for a lower-accuracy but immediately usable result
+(see "Georeferencing a norgeibilder.no screenshot" below), and
+`auto_gcp.py` automates that whole matching process (see "Automatic
+georeferencing" below) so a batch of screenshots can each be fit without
+a human clicking corners. **Working end to end, for real**: all 8
+manually-captured screenshots on hand for 123/9 (1956, 1970, 1986, 1991,
+2006, 2011, 2016, 2025) are georeferenced, 7 of them fully automatically
+(RMSE 0.9-2.5 m each) and one (2006, whose tight crop violates one of
+the automatic method's assumptions - see "Automatic georeferencing")
+via the manual fallback (RMSE 0.97 m) - `plot_overlay.py`'s batch mode
+(see "Per-property output folder" below) regenerates every overlay in
+one command.
 
 ## `property.py`: cadastral boundary lookup
 
@@ -37,6 +57,16 @@ silently.
 **Verified for 123/9, Etnedal**: a single Teig, area 645,059 m^2 (~0.65
 km^2), bounds (214493.684, 6764447.438, 215277.451, 6765663.722) in
 EPSG:25833 (ETRS89 / UTM 33N).
+
+Besides printing a summary, this also saves the polygon to
+`property_polygon.csv` in the property's output folder (see
+"Per-property output folder" below) - a real CSV (not a `.dat` file,
+which macOS has no default app for even though the content would be
+plain text) so it opens directly as a spreadsheet in Numbers/Excel:
+columns `part`/`ring`/`easting`/`northing`, one row per boundary point.
+`read_polygon_csv()` parses it straight back into the same shapely
+geometry, so it's a usable cache (e.g. during a Kartverket WFS outage),
+not just a human-readable dump.
 
 ## `imagery_search.py`: which years actually have coverage
 
@@ -80,6 +110,14 @@ reflown every ~10-15 years historically (and only recently, since the
 per calendar year" was never going to be fully achievable for a specific
 year range that includes gap years, regardless of search thoroughness.
 
+Run as `python3 imagery_search.py Etnedal 123 9` - kommune/gnr/bnr are
+required positional arguments (same style as `property.py`; there's no
+default property, so running it with none prints a usage error rather
+than silently searching for some other property). Besides printing the
+table above, this also saves every candidate project found (covering or
+near-miss) to `imagery_coverage.csv` in the property's output folder -
+a real CSV, opens directly as a spreadsheet in Numbers/Excel.
+
 ## Blocker: downloading actual image pixels
 
 The metadata APIs above (`tjenester.norgeibilder.no`,
@@ -100,7 +138,210 @@ the request comes from (`Client: Request IP`). The older legacy WMS
 and returned an explicit "TCP/IP address not found" rejection when
 tested from here - also not self-servable.
 
-See the bottom of this file for the two open decisions this raises.
+**A GeoID account itself is gated, not free-for-anyone** (corrected
+after an earlier version of this doc said otherwise): per Geonorge's own
+access documentation, "GeoID-tilgang gis bare til parter i Norge
+digitalt-samarbeidet" (GeoID access is only given to parties in the
+Norge digitalt collaboration) - Norge digitalt being Kartverket's
+national geodata-sharing partnership of ~500 public/private
+organizations, not a personal signup. There are two real paths to a
+token:
+
+1. **Your organization is (or becomes) a Norge digitalt party.**
+   Membership is a party agreement, not a paid product - many Norwegian
+   public bodies, municipalities, and research institutions already
+   have one. Worth checking internally first (a GIS/geodata coordinator
+   or IT department would know) before assuming it's not available -
+   this is often the fastest path since it may already exist and just
+   not be widely known within the organization.
+2. **A direct data-access agreement with Kartverket**, for
+   organizations that aren't (and don't want to become) full Norge
+   digitalt parties - requested via kundesenter@kartverket.no. This is
+   the "and those who enter into an agreement on data access" clause in
+   Kartverket's own access text, and may be simpler/faster than a full
+   partnership for a single project's worth of imagery.
+
+Note this is a different thing from **data.norge.no** ("Data Norge"),
+Norway's general open-data *catalog* (a discovery/metadata index across
+public administration, not an access-control system) - if an
+application through that route was rejected for lacking organizational
+membership, it likely redirected into the Norge digitalt process above,
+which is the actual gate.
+
+## Georeferencing a norgeibilder.no screenshot (no token needed)
+
+`georeference_screenshot.py` is today's actual path forward, chosen
+because none of the three routes to a real GeoID token above fit this
+project's current stage (see "Status"). norgeibilder.no's browser
+viewer needs no login and lets you pick any historical "prosjekt"
+(year) with the eiendomsgrenser (property boundary) overlay turned on -
+so a screenshot already has the property's boundary drawn on it, in
+exactly the shape and position property.py already knows the real-world
+coordinates of. That's enough to georeference the screenshot directly:
+match a handful of recognizable boundary corners in the image to their
+known (easting, northing), and fit the same kind of 6-parameter affine
+("world file") transform used to georeference scanned paper maps.
+
+This is deliberately approximate, not a substitute for a real WMS
+download - accuracy is limited by screenshot resolution (whatever zoom
+level the browser was at, not the source photo's native resolution) and
+how precisely boundary corners can be clicked. The `fit` step reports
+its own residual error in meters, so the accuracy achieved is known, not
+assumed. 123/9's boundary is a genuinely complex shape (221 original
+vertices - it follows a stream for much of its length), so
+`list-vertices` simplifies it down to a manageable, labeled set of real
+corners first, highlighting the four cardinal extremes as usually the
+easiest to identify unambiguously even in a low-resolution screenshot.
+For closely-spaced candidate corners, identify them by prediction and
+verification rather than guessing blind: fit a preliminary transform
+from a few unambiguous points (e.g. the single northmost vertex - unique
+on the whole polygon), use it to predict where other vertices should
+fall in the image, and check each prediction against the actual
+screenshot before accepting it as a GCP.
+
+Workflow:
+
+    python3 georeference_screenshot.py list-vertices --kommune Etnedal --gnr 123 --bnr 9
+    # -> prints/plots numbered candidate corners; compare its shape against
+    #    your screenshot's eiendomsgrenser line to identify matching corners
+
+    python3 georeference_screenshot.py pick --screenshot photo_2016.png
+    # -> click each recognizable corner; pixel (x,y) prints to console
+    #    (run on your own machine - needs a display)
+
+    python3 georeference_screenshot.py fit --kommune Etnedal --gnr 123 --bnr 9 \
+        --screenshot photo_2016.png --year 2016 \
+        --gcp 0:209:815 --gcp 6:1718:1083 --gcp 13:1104:2545 --gcp 19:474:2116
+    # -> fits the transform, reports RMSE, writes a tagged GeoTIFF +
+    #    manifest.json entry in the same format download_images.py uses
+
+Needs at least 3 GCPs (the minimum for a 2D affine fit); 4+, well spread
+around the property and not collinear, both improves the fit and gives a
+meaningful error estimate (with exactly 3 the fit is mathematically
+exact through all three points regardless of true accuracy, so its
+reported RMSE is ~0 by construction, not a real check).
+
+**Verified two ways**: first end-to-end with a synthetic test screenshot
+(the property boundary rendered at a known 0.5 m/pixel, 2-degree-rotated
+transform, fed back through `list-vertices` + `fit`) - recovered the
+exact known transform to numerical precision (RMSE ~1e-5 m), confirming
+the affine-fit math and the GeoTIFF/manifest writing both work
+correctly. Then for real: a real 2025 screenshot fit with 5 GCPs
+identified by the predict-and-verify method above gave RMSE = 3.75 m
+(max error 6.65 m) on a ~1.3 m/pixel image - about 3 pixels of error -
+and `plot_overlay.py`'s output (boundary fetched fresh from the live
+WFS, overlaid on the real photo) lines up almost exactly with the
+boundary already drawn into the photo by norgeibilder.no itself.
+
+## Automatic georeferencing (`auto_gcp.py`)
+
+The manual workflow above (`list-vertices` / `pick` / `fit`) needs a
+human to identify which boundary corner in the screenshot is which
+known vertex. `auto_gcp.py` automates that matching, so a whole batch of
+screenshots can each be fit without anyone clicking corners:
+
+    python3 auto_gcp.py --kommune Etnedal --gnr 123 --bnr 9
+    # -> for every raw input screenshot found that isn't already in
+    #    manifest.json, auto-extract GCPs, fit, and report RMSE/quality
+
+Same color-threshold-and-contour extraction as the manual workflow, but
+the corner-matching step went through two real, tested-and-discarded
+designs before landing on one that actually works reliably - worth
+recording, since both failures are the kind of thing that looks
+plausible until checked against real data:
+
+1. **A rigid slide of the two corner sequences against each other**
+   (matching pixel corners to world vertices index-by-index at a fixed
+   offset) - breaks the moment the two independently-chosen
+   simplification levels don't have exactly matching corner counts
+   (the normal case, not an edge case): a single extra or missing
+   corner anywhere desyncs every match after it.
+2. **Proper sequence alignment** (dynamic programming, the same idea
+   used to diff text or align DNA - allows the world side to "skip" a
+   vertex the pixel simplification merged away) - fixes the desync
+   problem, but turn angles alone turned out to be an insufficient
+   signal on their own: verified directly on this project's real 2025
+   screenshot that a geometrically *wrong* alignment can score a better
+   (lower) angle-only cost than the actual correct one, since angles
+   don't encode rotation or scale.
+
+**What actually works**: treat sequence alignment (and a second,
+independent crude bounding-box-based guess) as *rough seed generators*
+only, then refine every seed with Iterative Closest Point (ICP) -
+project pixel corners through the current transform, snap each to its
+nearest point on the property's real (unsimplified) boundary, refit,
+repeat with a shrinking match-distance gate. ICP does the real work:
+verified directly that it reliably converges to the correct alignment
+even from a badly wrong seed (RMSE >100 m before refinement) - so seed
+quality only needs to be roughly plausible, not precise.
+
+ICP is a *local* refinement method, though, and testing against real
+screenshots found a second real failure mode worth recording: it can
+converge to a self-consistent but globally wrong registration - a low
+RMSE on a small, locally-agreeing subset of points (e.g. a repetitive
+zigzag section of the boundary matching itself at the wrong offset),
+while the transform itself is degenerate (compresses one axis far more
+than the other) or the image ends up rotated 25-160 degrees from
+reality - deceptively low RMSE, clearly wrong result if you looked at
+the image. A low RMSE alone is not sufficient evidence of a correct
+fit. Fixed by filtering *every* candidate fit, not just the
+lowest-RMSE one, on two independent, cheap checks before RMSE is
+allowed to pick a winner: the transform's two axis scales must be
+within 15% of each other (every genuine fit on real data measured
+within 0.6%; the observed degenerate case was 2.36x), and its implied
+rotation must be within 20 degrees of north-up (real screenshots are
+all ~0 degrees - norgeibilder.no's viewer has no rotation control a
+user could trigger even by accident; observed failures ranged
+25-160 degrees).
+
+**Verified on all 8 of this project's real screenshots** (1956, 1970,
+1986, 1991, 2006, 2011, 2016, 2025): 7 fit automatically with RMSE
+0.9-2.5 m (visually confirmed correct via `plot_overlay.py` for every
+one, not just spot-checked). 2006 is the one exception - its screenshot
+is cropped tightly enough that the whole property isn't visible in
+frame, violating the bounding-box seed strategy's assumption, and no
+automatic fit passed the checks above - georeference_screenshot.py's
+manual workflow handled it instead (RMSE 0.97 m). This is the intended
+fallback for that situation, not a bug: `auto_gcp.py` fails loudly (an
+error, or reporting no confident match) rather than silently accepting
+a wrong registration, and `manifest.json`'s `georeferencing_method`
+field always records which path (`automatic_gcp_extraction` vs.
+`manual_gcp_affine_fit`) produced each year's fit.
+
+## Per-property output folder
+
+Every script that writes files takes `--kommune`/`--gnr`/`--bnr` and
+defaults its output folder to `property.py`'s `property_code()`:
+`<gnr>-<bnr>-<kommune>`, e.g. `123-9-Etnedal` - so the folder name alone
+establishes which property everything inside it belongs to, without
+needing to open a manifest, and multiple properties stay cleanly
+separated as sibling folders (override with `--outdir` if needed).
+
+To add a new year: capture a screenshot as described above and drop it
+into that folder, named `<gnr>-<bnr>-<kommune>-<year>.png` (e.g.
+`123-9-Etnedal-2011.png`) - matching what `georeference_screenshot.py
+fit` and `download_images.py` themselves write for the *processed*
+outputs, just without the `_<year>_screenshot.tif`/similar suffix, so
+the two are never confused for one another.
+
+Then run `plot_overlay.py` with no `--image`/`--year` for **batch
+mode**: it scans the folder for both already-georeferenced years (in
+`manifest.json`) and raw screenshots named as above, regenerates the
+overlay PNG for every already-georeferenced year in one go, and reports
+which raw screenshots don't have a fit yet (fitting itself still needs
+GCPs identified per image via `list-vertices`/`pick`/`fit` - not
+something this step does on its own):
+
+    python3 plot_overlay.py --kommune Etnedal --gnr 123 --bnr 9
+    # 123-9-Etnedal: 1 georeferenced year(s), 8 raw input screenshot(s) found.
+    #   2025: saved 123-9-Etnedal/123-9-Etnedal_2025_screenshot_overlay.png
+    #
+    # Raw screenshots found with no georeferenced fit yet - run
+    # georeference_screenshot.py's list-vertices/pick/fit workflow for these
+    # before an overlay can be made:
+    #   1956: 123-9-Etnedal/123-9-Etnedal-1956.png
+    #   1970: 123-9-Etnedal/123-9-Etnedal-1970.png
+    #   ...
 
 ## Coordinate systems
 
@@ -115,9 +356,12 @@ See the bottom of this file for the two open decisions this raises.
 
 | File | Purpose |
 |---|---|
-| `property.py` | Fetch a cadastral property boundary by kommune + gnr/bnr |
+| `property.py` | Fetch a cadastral property boundary by kommune + gnr/bnr; `property_code()` names the per-property output folder |
 | `imagery_search.py` | Find which Norge i Bilder projects actually cover a property, by year |
-| `download_images.py` | **Run this yourself** (see below) - fetches one GeoTIFF per confirmed year |
+| `download_images.py` | Needs a GeoID token (see "Blocker") - fetches one GeoTIFF per confirmed year via the proper WMS |
+| `georeference_screenshot.py` | Manual fallback - georeferences a screenshot from human-identified GCPs (`list-vertices` / `pick` / `fit`) |
+| `auto_gcp.py` | **Today's actual path** - georeferences a batch of screenshots automatically (DP alignment + bbox seeds, refined by ICP) |
+| `plot_overlay.py` | Plots a georeferenced photo with the live cadastral boundary overlaid; batch mode processes every already-fitted year in one go |
 
 ## Running `download_images.py`
 
@@ -125,8 +369,10 @@ This step needs to run from your own machine, not this sandboxed
 environment, because the token it needs is bound to the IP address that
 requests it:
 
-1. Log in at <https://norgeibilder.no/> with a GeoID account (free to
-   create if you don't have one).
+1. Get a GeoID account - see "Blocker" above: this requires your
+   organization to be a Norge digitalt party, or a direct data-access
+   agreement via kundesenter@kartverket.no. Then log in at
+   <https://norgeibilder.no/>.
 2. Generate a token at <https://services.norgeibilder.no/token> -
    Client = "Request IP", expiry 1 hour is plenty for one run.
 3. Copy this project folder to your machine (or just these three .py
@@ -138,22 +384,24 @@ requests it:
 5. Then run the real download:
    `python3 download_images.py --token <TOKEN>`
 
-Output, in `output/`:
-- `123-9_Etnedal_<year>.tif` for each of 1958, 1970, 1991, 2006, 2011,
+Output, in `123-9-Etnedal/` (see "Per-property output folder" above):
+- `123-9-Etnedal_<year>.tif` for each of 1958, 1970, 1991, 2006, 2011,
   2016, 2025 - GeoTIFFs (EPSG:25833) cropped tightly to the property's
   own bounding box (no extra context margin), each tagged with the
   photo date, source project, resolution, and property identifiers as
   embedded TIFF metadata (readable via `gdalinfo` or `rasterio`'s
   `.tags()`, so the info travels with the file even if renamed).
-- `123-9_Etnedal_boundary.geojson` - the property outline reprojected to
+- `123-9-Etnedal_boundary.geojson` - the property outline reprojected to
   EPSG:4326 (WGS84 lon/lat), the CRS phone GPS reports in.
-- `123-9_Etnedal_manifest.json` - one place with everything the two
+- `123-9-Etnedal_manifest.json` - one place with everything the two
   planned follow-on features need: each image's filename/year/photo
   date/resolution, and the shared bounding box in *both* EPSG:25833 and
   EPSG:4326 - so a mobile app can convert a GPS fix to a pixel
   coordinate on any of these images with just an affine transform
   (image bounds + pixel dimensions), no reprojection library required
-  on-device.
+  on-device. The same manifest.json (and folder) is shared with
+  `georeference_screenshot.py fit` - `fit` merges into it rather than
+  overwriting, so images from both methods coexist in one manifest.
 
 Why EPSG:25833 for the images: it's the same CRS Kartverket's own
 terrain data (hoydedata.no) uses, and the one the cadastre/imagery APIs

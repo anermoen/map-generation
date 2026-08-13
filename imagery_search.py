@@ -32,8 +32,16 @@ step (actually downloading pixels).
 
 Usage
 -----
-    python3 imagery_search.py                    # uses 123/9 Etnedal
-    python3 imagery_search.py <kommune> <gnr> <bnr>
+    python3 imagery_search.py <kommune> <gardsnummer> <bruksnummer>
+
+(same required positional arguments as property.py - there is no
+default property; running with none prints a usage error rather than
+silently searching for some other property). Prints every candidate
+project found (covering or near-miss) and saves the same information to
+imagery_coverage.csv - a real CSV, opens directly as a spreadsheet in
+Numbers/Excel - in the property's own output folder (default:
+"<gnr>-<bnr>-<kommune>", e.g. 123-9-Etnedal - see property_code(); pass
+--outdir to override).
 
 or as a library:
 
@@ -43,7 +51,9 @@ or as a library:
     projects = find_covering_projects(prop.polygon)
 """
 
-import sys
+import argparse
+import csv
+import os
 import urllib.parse
 import concurrent.futures
 from dataclasses import dataclass
@@ -161,16 +171,52 @@ def best_covering_project(projects, year, allow_satellite=False, max_distance_m=
     return min(candidates, key=lambda p: p.pixel_size_m)
 
 
-def main():
-    if len(sys.argv) == 4:
-        kommune, gnr, bnr = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
-    elif len(sys.argv) == 1:
-        kommune, gnr, bnr = "Etnedal", 123, 9
-    else:
-        print("Usage: python3 imagery_search.py [<kommune> <gnr> <bnr>]")
-        sys.exit(1)
+def imagery_csv_path(outdir):
+    return os.path.join(outdir, "imagery_coverage.csv")
 
-    prop = fetch_property(kommune, gnr, bnr)
+
+def write_imagery_csv(prop, projects, outdir):
+    """Write every candidate project found for prop (covering or
+    near-miss - the same list main() prints) to imagery_coverage.csv - a
+    real CSV, opens directly as a spreadsheet in Numbers/Excel - with a
+    few commented metadata lines identifying the property, then a header
+    row and one row per project. distance_m == 0 means the project's
+    real flown coverage polygon actually contains the property (not just
+    an overlapping bounding box, per this module's docstring); a nonzero
+    distance is a near-miss, kept for context rather than dropped, the
+    same way main()'s console output does. Returns the path written."""
+    os.makedirs(outdir, exist_ok=True)
+    path = imagery_csv_path(outdir)
+    with open(path, "w", newline="") as f:
+        f.write("# Norge i Bilder project coverage search results (imagery_search.py)\n")
+        f.write(f"# matrikkelnummer: {prop.matrikkelnummer}\n")
+        f.write(f"# kommune: {prop.kommunenavn} (kommunenummer {prop.kommunenummer})\n")
+        f.write(f"# property_area_m2: {prop.polygon.area:.3f}\n")
+        f.write("# distance_m == 0 means the project's real flown coverage polygon\n")
+        f.write("# actually contains the property (not just an overlapping bounding\n")
+        f.write("# box); a nonzero distance is a near-miss, kept here for context.\n")
+        writer = csv.writer(f)
+        writer.writerow(["year", "project_name", "photo_date", "pixel_size_m",
+                          "type", "distance_m"])
+        for p in projects:
+            kind = "satellite" if p.is_satellite else ("cir" if p.is_cir else "aerial")
+            writer.writerow([p.year, p.name, p.photo_date, f"{p.pixel_size_m:g}",
+                              kind, f"{p.distance_m:.3f}"])
+    return path
+
+
+def main():
+    ap = argparse.ArgumentParser(
+        description="Find which Norge i Bilder projects cover a property, by year.")
+    ap.add_argument("kommune")
+    ap.add_argument("gardsnummer", type=int)
+    ap.add_argument("bruksnummer", type=int)
+    ap.add_argument("--outdir", default=None,
+                     help="default: a folder named after the property itself, "
+                          "'<gnr>-<bnr>-<kommune>' (e.g. 123-9-Etnedal) - see property_code()")
+    args = ap.parse_args()
+
+    prop = fetch_property(args.kommune, args.gardsnummer, args.bruksnummer)
     print(f"Property: {prop.matrikkelnummer} in {prop.kommunenavn}, area {prop.polygon.area:,.0f} m^2\n")
 
     projects = find_covering_projects(prop.polygon)
@@ -179,6 +225,10 @@ def main():
         kind = "SATELLITE" if p.is_satellite else ("CIR" if p.is_cir else "aerial")
         print(f"{p.year}  {p.name!r:42s} {p.photo_date}  {p.pixel_size_m:>5g}m/px  "
               f"{kind:9s}  {cov}")
+
+    outdir = args.outdir or prop.code
+    path = write_imagery_csv(prop, projects, outdir)
+    print(f"\nSaved {path}")
 
 
 if __name__ == "__main__":
