@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">Aerial Time Viewer</string>
+    <string name="location_permission_rationale">Location access is needed to show your position on the historical aerial photo.</string>
+    <string name="no_years_found">No historical imagery bundled - copy .mbtiles files into assets/mbtiles (see generate_mbtiles.py)</string>
+</resources>

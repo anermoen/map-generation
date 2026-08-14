@@ -31,7 +31,7 @@ kommunenummer at request time via Kartverket's Kommuneinfo API:
 
 Usage
 -----
-    python3 property.py Etnedal 123 9
+    python3 property.py --kommune Etnedal --gnr 123 --bnr 9
 
 Fetches the boundary, prints a summary, and saves the polygon to
 property_polygon.csv - a real CSV, opens directly as a spreadsheet in
@@ -293,15 +293,15 @@ def read_polygon_csv(path):
 def main():
     ap = argparse.ArgumentParser(
         description="Fetch a cadastral property boundary and save it to property_polygon.dat.")
-    ap.add_argument("kommune")
-    ap.add_argument("gardsnummer", type=int)
-    ap.add_argument("bruksnummer", type=int)
+    ap.add_argument("--kommune", required=True)
+    ap.add_argument("--gnr", type=int, required=True)
+    ap.add_argument("--bnr", type=int, required=True)
     ap.add_argument("--outdir", default=None,
                      help="default: a folder named after the property itself, "
                           "'<gnr>-<bnr>-<kommune>' (e.g. 123-9-Etnedal) - see property_code()")
     args = ap.parse_args()
 
-    prop = fetch_property(args.kommune, args.gardsnummer, args.bruksnummer)
+    prop = fetch_property(args.kommune, args.gnr, args.bnr)
     print(f"Kommune:          {prop.kommunenavn} ({prop.kommunenummer})")
     print(f"Matrikkelnummer:  {prop.matrikkelnummer}")
     print(f"Geometry type:    {prop.polygon.geom_type}")

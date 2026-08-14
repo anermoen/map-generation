@@ -5,5 +5,8 @@ __pycache__/
 # Per-property output folders, named "<gnr>-<bnr>-<kommune>" (e.g.
 # 123-9-Etnedal) by property.py's property_code() - manually-captured
 # screenshots, georeferenced GeoTIFFs, overlays, and manifest.json are
-# all regenerable/re-droppable, so none of it is tracked.
-[0-9]*-[0-9]*-*/
+# all regenerable/re-droppable, so none of it is tracked. Anchored to
+# the repo root (leading /) - docs/tiles/<property_code>/ uses this
+# same naming convention but *is* tracked (export_web_tiles.py's output
+# is exactly what GitHub Pages needs to serve, not a working file).
+/[0-9]*-[0-9]*-*/

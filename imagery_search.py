@@ -32,11 +32,12 @@ step (actually downloading pixels).
 
 Usage
 -----
-    python3 imagery_search.py <kommune> <gardsnummer> <bruksnummer>
+    python3 imagery_search.py --kommune <kommune> --gnr <gardsnummer> --bnr <bruksnummer>
 
-(same required positional arguments as property.py - there is no
-default property; running with none prints a usage error rather than
-silently searching for some other property). Prints every candidate
+(same required flags as every other script in this project - there is
+no default property; running with any of them missing prints a usage
+error rather than silently searching for some other property). Prints
+every candidate
 project found (covering or near-miss) and saves the same information to
 imagery_coverage.csv - a real CSV, opens directly as a spreadsheet in
 Numbers/Excel - in the property's own output folder (default:
@@ -208,15 +209,15 @@ def write_imagery_csv(prop, projects, outdir):
 def main():
     ap = argparse.ArgumentParser(
         description="Find which Norge i Bilder projects cover a property, by year.")
-    ap.add_argument("kommune")
-    ap.add_argument("gardsnummer", type=int)
-    ap.add_argument("bruksnummer", type=int)
+    ap.add_argument("--kommune", required=True)
+    ap.add_argument("--gnr", type=int, required=True)
+    ap.add_argument("--bnr", type=int, required=True)
     ap.add_argument("--outdir", default=None,
                      help="default: a folder named after the property itself, "
                           "'<gnr>-<bnr>-<kommune>' (e.g. 123-9-Etnedal) - see property_code()")
     args = ap.parse_args()
 
-    prop = fetch_property(args.kommune, args.gardsnummer, args.bruksnummer)
+    prop = fetch_property(args.kommune, args.gnr, args.bnr)
     print(f"Property: {prop.matrikkelnummer} in {prop.kommunenavn}, area {prop.polygon.area:,.0f} m^2\n")
 
     projects = find_covering_projects(prop.polygon)

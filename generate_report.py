@@ -118,9 +118,9 @@ def load_manifest(outdir, basename):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--kommune", default="Etnedal")
-    ap.add_argument("--gnr", type=int, default=123)
-    ap.add_argument("--bnr", type=int, default=9)
+    ap.add_argument("--kommune", required=True)
+    ap.add_argument("--gnr", type=int, required=True)
+    ap.add_argument("--bnr", type=int, required=True)
     ap.add_argument("--outdir", default=None)
     args = ap.parse_args()
 

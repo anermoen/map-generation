@@ -1,0 +1,75 @@
+html, body {
+    margin: 0;
+    height: 100%;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+}
+
+#map {
+    position: absolute;
+    inset: 0;
+}
+
+#toolbar {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    z-index: 1000;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: max(10px, env(safe-area-inset-top)) 16px 10px;
+    background: rgba(33, 33, 33, 0.85);
+    color: #fff;
+}
+
+#property-select,
+#year-select {
+    font-size: 16px;
+    padding: 4px 8px;
+    border-radius: 4px;
+    border: none;
+    min-width: 0;
+}
+
+#property-select {
+    flex: 1 1 auto;
+    text-overflow: ellipsis;
+}
+
+#year-select {
+    flex: 0 0 auto;
+}
+
+#status-banner {
+    position: absolute;
+    top: 56px;
+    left: 16px;
+    right: 16px;
+    z-index: 1000;
+    background: rgba(200, 50, 50, 0.9);
+    color: #fff;
+    padding: 8px 12px;
+    border-radius: 6px;
+    font-size: 14px;
+}
+
+#locate-button {
+    position: absolute;
+    right: 16px;
+    bottom: max(24px, env(safe-area-inset-bottom));
+    z-index: 1000;
+    width: 48px;
+    height: 48px;
+    border-radius: 50%;
+    border: none;
+    background: #fff;
+    color: #1a73e8;
+    font-size: 24px;
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.4);
+}
+
+#locate-button:active {
+    background: #eee;
+}

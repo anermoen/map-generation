@@ -150,9 +150,9 @@ def plot_overlay(image_path, prop, out_path, title=None):
 def main():
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--kommune", default="Etnedal")
-    ap.add_argument("--gnr", type=int, default=123)
-    ap.add_argument("--bnr", type=int, default=9)
+    ap.add_argument("--kommune", required=True)
+    ap.add_argument("--gnr", type=int, required=True)
+    ap.add_argument("--bnr", type=int, required=True)
     ap.add_argument("--image", help="path to a georeferenced GeoTIFF")
     ap.add_argument("--year", type=int,
                      help="alternative to --image: look the filename up in manifest.json")

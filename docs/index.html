@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+    <title>Aerial Time Viewer</title>
+    <link rel="manifest" href="manifest.webmanifest">
+    <meta name="theme-color" content="#212121">
+    <link rel="icon" href="icons/icon-192.png">
+    <link rel="apple-touch-icon" href="icons/icon-192.png">
+    <link rel="stylesheet" href="vendor/leaflet/leaflet.css">
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div id="map"></div>
+
+    <div id="toolbar">
+        <select id="property-select" aria-label="Property"></select>
+        <select id="year-select" aria-label="Year"></select>
+    </div>
+
+    <div id="status-banner" hidden></div>
+
+    <button id="locate-button" aria-label="Center on my location" title="Center on my location">&#9678;</button>
+
+    <script src="vendor/leaflet/leaflet.js"></script>
+    <script src="app.js"></script>
+</body>
+</html>

@@ -40,13 +40,109 @@ manually-captured screenshots on hand for 123/9 (1958, 1970, 1986, 1991,
 command. 14/987 Nittedal similarly has all 14 of its screenshots fit
 fully automatically (RMSE 0.04-1.7 m).
 
+## Full workflow, step by step
+
+Every step below is its own script, run manually, one at a time -
+nothing is auto-chained yet. That's deliberate for now: each step's
+output is worth a look before moving on (a bad boundary fit, a coverage
+search that came back empty, etc.), and a single orchestrating command
+that hides that is a natural later step once the manual sequence has
+been trusted through enough real properties, not before. All output for
+one property lands in one shared folder - see "Per-property output
+folder" below - so later steps find earlier steps' files with no extra
+wiring.
+
+**Every script below takes the property the same way**:
+`--kommune`/`--gnr`/`--bnr`, all three required - every single one of
+them, `property.py` and `imagery_search.py` included, fails loudly with
+argparse's usage message if you omit any of them, rather than silently
+defaulting to some other property. This wasn't always true - earlier
+versions of `property.py`/`imagery_search.py` took the property as
+positional arguments, and `plot_overlay.py`/`generate_report.py`
+silently defaulted to Etnedal 123/9 if the flags were left off - both
+fixed for exactly the reason the previous paragraph gives: an
+inconsistent or silently-wrong CLI is worse for a "run it stepwise,
+review each output" workflow than a script that just refuses to guess.
+Replace `Etnedal 123 9` with your own kommune/gnr/bnr throughout.
+
+1. **Look up the property boundary.**
+
+       python3 property.py --kommune Etnedal --gnr 123 --bnr 9
+
+   Fetches the cadastral polygon from Kartverket's live WFS and saves
+   `property_polygon.csv`. Nothing to review here - every later step
+   re-fetches the boundary live too, rather than trusting a possibly
+   stale saved copy.
+
+2. **Find which years actually have coverage.**
+
+       python3 imagery_search.py --kommune Etnedal --gnr 123 --bnr 9
+
+   Lists every Norge i Bilder project that covers the property, by
+   year (and how far off the near-misses are), and saves
+   `imagery_coverage.csv`. Worth a look before capturing any
+   screenshots - no point capturing a year with no real coverage.
+
+3. **Capture screenshots manually**, for whichever years step 2 showed
+   real coverage for - no script for this yet (see "Blocker" above for
+   why the proper WMS route isn't available). From norgeibilder.no,
+   with the eiendomsgrenser (property boundary) layer switched on, save
+   each into the property's output folder named
+   `<gnr>-<bnr>-<kommune>-<year>.png` (e.g. `123-9-Etnedal-1970.png`).
+
+4. **Georeference the screenshots.**
+
+       python3 auto_gcp.py --kommune Etnedal --gnr 123 --bnr 9
+
+   Automatic for every screenshot it can confidently fit (see
+   "Automatic (`auto_gcp.py`) - start here" below for exactly how, and
+   its real failure modes/fixes to date). Prints which years it
+   couldn't - fall back to `georeference_screenshot.py`'s manual
+   `list-vertices`/`pick`/`fit` workflow (below) for those specifically,
+   not the whole batch.
+
+5. **Render overlays for visual review.**
+
+       python3 plot_overlay.py --kommune Etnedal --gnr 123 --bnr 9
+
+   The photo, georeferenced, with the *live* cadastral boundary drawn
+   on top - the actual check that a fit is correct, not just
+   numerically plausible (a low RMSE alone isn't sufficient evidence -
+   see `auto_gcp.py`'s documented failure modes below for real cases
+   where it wasn't). Look at these before trusting step 4's output.
+
+6. **Build the Word report.**
+
+       python3 generate_report.py --kommune Etnedal --gnr 123 --bnr 9
+
+   One A4 page per fitted year, each captioned with its real source
+   project and accuracy - see "Generating the Word report" below.
+
+7. **Package for on-phone viewing.**
+
+       python3 generate_mbtiles.py --kommune Etnedal --gnr 123 --bnr 9
+
+   One MBTiles file per fitted year - see "Viewing on Android" and
+   "Viewing in a browser" below for the two ways to actually look at
+   these on a phone, and why there are two. Both read this same output,
+   nothing else from step 6 needed twice.
+
+8. **For the browser viewer specifically, one more unpacking step**
+   (not needed for the Android app, which reads MBTiles directly):
+
+       python3 export_web_tiles.py --kommune Etnedal --gnr 123 --bnr 9
+
+   Unpacks step 7's MBTiles into `docs/tiles/123-9-Etnedal/` as plain
+   static files - see "Viewing in a browser" below for why that's a
+   separate step and not just part of step 7.
+
 ## `property.py`: cadastral boundary lookup
 
 Fetches a property's exact polygon boundary from Kartverket's open WFS
 service ("Matrikkelen - Eiendomskart Teig", no API key needed), given a
 kommune name and gnr/bnr:
 
-    python3 property.py Etnedal 123 9
+    python3 property.py --kommune Etnedal --gnr 123 --bnr 9
 
 Kommunenummer (the 4-digit code the WFS actually filters on) is resolved
 at request time via Kartverket's Kommuneinfo API rather than hardcoded -
@@ -110,10 +206,11 @@ reflown every ~10-15 years historically (and only recently, since the
 per calendar year" was never going to be fully achievable for a specific
 year range that includes gap years, regardless of search thoroughness.
 
-Run as `python3 imagery_search.py Etnedal 123 9` - kommune/gnr/bnr are
-required positional arguments (same style as `property.py`; there's no
-default property, so running it with none prints a usage error rather
-than silently searching for some other property). Besides printing the
+Run as `python3 imagery_search.py --kommune Etnedal --gnr 123 --bnr 9` -
+`--kommune`/`--gnr`/`--bnr` are all required (same style as every other
+script in this project; there's no default property, so running it with
+any of them missing prints a usage error rather than silently searching
+for some other property). Besides printing the
 table above, this also saves every candidate project found (covering or
 near-miss) to `imagery_coverage.csv` in the property's output folder -
 a real CSV, opens directly as a spreadsheet in Numbers/Excel.
@@ -198,11 +295,12 @@ just working:
   be `list-vertices`, `pick`, or `fit`, with `--kommune`/`--gnr`/
   `--bnr` coming after that -
   `python3 georeference_screenshot.py list-vertices --kommune Etnedal
-  --gnr 123 --bnr 9`. Running `python3 georeference_screenshot.py
-  Etnedal 123 9` (i.e. property.py/auto_gcp.py's style, without a
-  subcommand) fails with `error: argument command: invalid choice:
-  'Etnedal'` - argparse is trying to match "Etnedal" against
-  `{list-vertices,pick,fit}` and failing, not rejecting the property.
+  --gnr 123 --bnr 9`. Typing the property directly as bare positional
+  values with no subcommand and no `--kommune`/`--gnr`/`--bnr` flags -
+  `python3 georeference_screenshot.py Etnedal 123 9` - fails with
+  `error: argument command: invalid choice: 'Etnedal'`: argparse is
+  trying to match "Etnedal" against `{list-vertices,pick,fit}` and
+  failing, not rejecting the property.
 
 ### Automatic (`auto_gcp.py`) - start here
 
@@ -493,6 +591,8 @@ confidently fit, `georeference_screenshot.py`'s manual `list-vertices`/
 | `georeference_screenshot.py` | Manual fallback for years `auto_gcp.py` can't fit - georeferences one screenshot from human-identified GCPs; **subcommand-based** (`list-vertices` / `pick` / `fit`) |
 | `plot_overlay.py` | Plots a georeferenced photo with the live cadastral boundary overlaid; batch mode processes every already-fitted year in one go |
 | `generate_report.py` | Builds a Word report (A4, one overlay figure per fitted year) - see "Generating the Word report" below |
+| `generate_mbtiles.py` | Packages each fitted year into an offline map-tile file for the Android app - see "Viewing on Android" below |
+| `export_web_tiles.py` | Unpacks that same MBTiles output into plain static tiles for the browser viewer - see "Viewing in a browser" below |
 
 ## Generating the Word report (`generate_report.py`)
 
@@ -525,6 +625,138 @@ silently reporting nothing:
 > Figure 1. 123/9, 1956 - source: 'Nordre Etnedal - Aurdal 1958' (aerial,
 > photo date 1958-06-05, 0.2 m/px native resolution) [nearest covering
 > project, dated 1958 - screenshot labelled 1956]. ...
+
+## Viewing on Android (`generate_mbtiles.py` + `android-app/`)
+
+    python3 generate_mbtiles.py --kommune Nittedal --gnr 14 --bnr 987
+    # -> one <property>_<year>.mbtiles per fitted year, in the property's output folder
+
+Packages each already-georeferenced GeoTIFF into an
+[MBTiles](https://github.com/mapbox/mbtiles-spec) file - a single
+SQLite database holding a Web Mercator (EPSG:3857) raster tile pyramid,
+the standard offline format most Android/iOS mapping libraries can load
+directly, no tile server involved. Written directly against rasterio +
+[mercantile](https://github.com/mapbox/mercantile) + Pillow + the
+stdlib's `sqlite3` rather than GDAL's own `gdal2tiles.py` - this
+sandbox has no standalone GDAL CLI, and `rio-mbtiles` pulls in a
+shapely version that fails to build here (no system GEOS); reprojecting
+each destination tile straight out of the source GeoTIFF turned out to
+be simple enough to not need either. Zoom range is chosen per year from
+its own native resolution (`pixel_size_m` in `manifest.json`), so a
+tightly-zoomed screenshot (Nittedal, ~0.08 m/px) gets a deeper zoom
+range than a zoomed-out one (Etnedal, ~1.3 m/px) - no benefit to tiling
+finer than the source photo actually resolves. Each tile's alpha
+channel is built by reprojecting a constant-255 array through the exact
+same warp as the RGB bands, so a tile's real (slightly rotated) photo
+footprint blends transparently into whatever's behind it rather than
+showing a visible rectangular seam - verified by decoding a real
+generated tile and inspecting it directly (14/987 Nittedal, 2015).
+
+`android-app/` is a from-scratch Kotlin/Android Studio project (see its
+own README) that bundles a property's `.mbtiles` files as assets and
+shows them with the phone's live GPS position on top via
+[osmdroid](https://github.com/osmdroid/osmdroid) - chosen for its
+built-in MBTiles archive support and no API-key requirement. A year
+spinner switches which year's imagery overlay is shown; the GPS dot
+stays on across every year. Currently bundled with all 14 of 14/987
+Nittedal's fitted years. Written outside Android Studio (this sandbox
+has no Android SDK/emulator to build or run it against) - see the app
+README's "Status" section before treating it as verified. In practice,
+this also turned out to be the harder of the two viewing options to
+actually get running: a company-managed Mac's software restrictions
+blocked installing Android Studio at all (not on the pre-approved
+install list, and the account had no admin rights to authorize it any
+other way, including via Homebrew) - which is what "Viewing in a
+browser" below exists to sidestep entirely.
+
+## Viewing in a browser (`export_web_tiles.py` + `docs/`)
+
+    python3 export_web_tiles.py --kommune Nittedal --gnr 14 --bnr 987
+    # -> docs/tiles/14-987-Nittedal/<year>/<z>/<x>/<y>.png for every year,
+    #    plus docs/tiles/14-987-Nittedal/manifest.json
+
+No Android Studio, no app install, no IT approval needed - just a URL
+in the phone's own browser. This exists specifically because
+`android-app/` turned out to hit a real, unresolvable-that-day
+blocker (see above); a browser sidesteps it entirely, since nothing
+needs installing beyond a browser the phone already has.
+
+MBTiles (what `generate_mbtiles.py` already produces) is a single
+SQLite file - fine for the Android app, which has a real program
+(osmdroid) to read it and answer individual tile requests, but GitHub
+Pages (and static file hosts generally) run no server-side code at
+all; they can only serve files that already exist as files.
+`export_web_tiles.py` does the equivalent unpacking once, ahead of
+time, straight from `generate_mbtiles.py`'s own output - no
+reprojection logic duplicated, it just re-shapes already-rendered
+tiles into a directory tree (and flips each tile's row from MBTiles'
+TMS convention back to the XYZ convention plain web tiles use - the
+same flip `generate_mbtiles.py` applied going the other way,
+self-inverse).
+
+`docs/` is the whole browser app - plain HTML/CSS/JS, no build step,
+using [Leaflet](https://leafletjs.com/) (vendored locally into
+`docs/vendor/`, not loaded from a CDN, so it's covered by the offline
+caching below too) for the map and the browser's standard Geolocation
+API for the live position dot - the direct web equivalent of
+`android-app/`'s osmdroid + GPS pairing. A year `<select>` swaps which
+year's tile layer is shown; which property to display comes from a
+`?property=<code>` URL query parameter (defaulting to 14/987 Nittedal
+if omitted - no in-app property picker across multiple bundled
+properties yet, same gap `android-app/` has). Verified for real with a
+headless-browser test (Playwright): loaded the page, simulated a GPS
+fix at the property, switched years, and confirmed both the location
+dot and the correct year's photo rendered correctly - not just that
+the files exist.
+
+**No live boundary check, and no context beyond the bundled tiles by
+default.** The property boundary line you see isn't a separate,
+computed layer the app checks your position against - it's whatever
+color line norgeibilder.no drew *into that year's own photo pixels*.
+Standing just outside the property, your dot lands on the correct
+real-world spot in the photo, visibly on the wrong side of the drawn
+line - but nothing flags or warns you about it. And since the bundled
+tiles only cover the property's own tight crop, wandering far enough
+outside it used to mean a blank grey screen with no context at all -
+fixed by adding plain [OpenStreetMap](https://www.openstreetmap.org/)
+streets as a fallback base layer beneath the historical overlay
+(visible wherever the historical tiles don't cover, and wherever
+there's signal - it's a live network layer, not bundled, so it simply
+won't load offline; the historical overlay + GPS dot, the actual
+offline-capable core, don't depend on it either way). Verified this
+fallback works and pulls in real street/building context around the
+property, not just a blank tile.
+
+Also found and fixed while testing this: Leaflet's default zoom
++/- control renders in the top-left corner of the map by default,
+which collided with the toolbar (full-width, also top) - confirmed
+directly in a screenshot that the "+" button was rendering completely
+hidden underneath the toolbar, leaving only "-" usable. Moved to
+bottom-left, clear of both the toolbar and the locate button/
+attribution at bottom-right. Pinch-to-zoom and double-tap-to-zoom were
+never affected either way - both are gesture-based and Leaflet enables
+them by default, independent of the on-screen button control.
+
+**Works offline after the first visit** - important for a rural
+property with weak signal, and the reason it's not just a plain static
+site. `docs/service-worker.js` precaches the app shell plus every
+bundled tile PNG (reading the exact list from each property's
+`manifest.json`, rather than guessing which tiles exist) the first
+time the page loads with a connection, so every later visit - GPS and
+all - works with no network at all. `docs/manifest.webmanifest` lets
+the phone's browser "Add to Home Screen" too, so it opens and behaves
+like a regular app icon despite being a web page underneath.
+
+**Deploying it**: push this repo to GitHub (already done - see below),
+then a one-time setting on GitHub's own site (not a script - no `gh`
+CLI available to automate it, and it's a repo settings change, not a
+file): **Settings -> Pages -> Source: Deploy from a branch -> Branch:
+`main`, folder: `/docs`**. GitHub then serves `docs/` at
+`https://<username>.github.io/<repo>/` - open that URL (or bookmark/
+"Add to Home Screen" it) on the phone and it's live, no further steps.
+Re-running `export_web_tiles.py` and pushing is the entire update
+process for adding a property or a new year - no rebuild, no
+reinstall, unlike the Android app.
 
 ## Running `download_images.py`
 
