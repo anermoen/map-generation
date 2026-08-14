@@ -10,15 +10,28 @@ without a human clicking corners.
 How it works
 ------------
 1. The eiendomsgrenser (property boundary) overlay is drawn in a
-   distinctive magenta - color-threshold the screenshot to get a binary
-   mask of all boundary lines visible (every nearby parcel, not just
-   ours), via OpenCV.
-2. Find the mask's connected contours (cv2.findContours) and pick the
-   one with the largest bounding box - the property being viewed is
-   presumably the one the screenshot was framed around, so its boundary
-   is the most prominent line in frame. (A real assumption, not a
-   certainty - see verify_registration() below for how this is checked
-   after the fact, not just trusted.)
+   distinctive, vivid color - but not always the *same* color: confirmed
+   on this project's own real screenshots that norgeibilder.no draws it
+   in magenta for one property (123/9 Etnedal) and green for another
+   (14/987 Nittedal), consistently across every year for a given
+   property, but differently between properties. detect_boundary_colors
+   scans the screenshot's hues for vivid, line-shaped candidates (see
+   its docstring) rather than assuming one fixed color, and - once per
+   batch run, not once per year - the top candidate is confirmed
+   interactively (confirm_boundary_color) before any fitting proceeds:
+   a low-stakes, low-cost check that catches a wrong color guess before
+   it can waste a whole batch's worth of fitting attempts on it. Pass
+   --boundary-color to skip detection/confirmation entirely and force a
+   specific color, or --yes to auto-accept the top detected candidate
+   without prompting (for scripted/non-interactive use).
+2. Color-threshold the screenshot with the confirmed color to get a
+   binary mask of all boundary lines visible (every nearby parcel, not
+   just ours), via OpenCV. Find the mask's connected contours
+   (cv2.findContours) and pick the one with the largest bounding box -
+   the property being viewed is presumably the one the screenshot was
+   framed around, so its boundary is the most prominent line in frame.
+   (A real assumption, not a certainty - see verify_registration() below
+   for how this is checked after the fact, not just trusted.)
 3. Simplify that contour to a set of corner points (cv2.approxPolyDP).
 
 4. The hard part: which extracted pixel corner is which real-world
@@ -94,12 +107,16 @@ list-vertices/pick/fit workflow is the fallback, not a bug to chase.
 Usage
 -----
     python3 auto_gcp.py --kommune Etnedal --gnr 123 --bnr 9
-    # -> for every raw input screenshot found (see plot_overlay.py's
+    # -> prompts once to confirm the auto-detected boundary-line color,
+    #    then for every raw input screenshot found (see plot_overlay.py's
     #    find_input_screenshots()) that isn't already in manifest.json,
     #    auto-extract GCPs, fit, and report per-year RMSE/quality.
 
     python3 auto_gcp.py --kommune Etnedal --gnr 123 --bnr 9 --years 1991 2006
     # -> just these years
+
+    python3 auto_gcp.py --kommune Nittedal --gnr 14 --bnr 987 --boundary-color 08bc46 --yes
+    # -> skip the prompt entirely: force green, don't ask for confirmation
 
 Output: same as georeference_screenshot.py fit - a tagged GeoTIFF and a
 manifest.json entry per successfully-fit year, in the property's output
@@ -124,9 +141,26 @@ from georeference_screenshot import simplified_vertices, fit_affine, write_bound
     _merge_into_manifest
 from plot_overlay import find_input_screenshots
 
-MAGENTA_MIN_CHANNEL = 120       # R,B threshold for the boundary line's color
-MAGENTA_GAP = 25                # how much higher R,B must be than G
 MIN_CONTOUR_DIM = 80            # ignore tiny contours (noise, unrelated UI elements)
+
+# Boundary-line color auto-detection (see detect_boundary_colors) - not a
+# single fixed color: confirmed on real data that norgeibilder.no draws
+# the eiendomsgrenser overlay in different colors for different
+# properties/sessions (magenta for 123/9 Etnedal, green for 14/987
+# Nittedal - both this project's real, manually-captured screenshots).
+HSV_SAT_MIN = 100               # min saturation (0-255) to count as a "vivid" pixel
+HSV_VAL_MIN = 100               # min value/brightness (0-255), same purpose
+HUE_BIN_WIDTH = 16               # degrees, OpenCV hue range is 0-179
+HUE_BIN_STEP = HUE_BIN_WIDTH // 2   # 50% overlap, so a true hue near a bin
+                                     # edge is never split across two
+                                     # under-threshold fragments
+FILL_RATIO_MAX = 0.65           # reject a candidate if its largest contour
+                                 # fills more than this fraction of its own
+                                 # bounding box - a thin boundary line only
+                                 # loosely fills its bbox (confirmed 0.0-0.5
+                                 # on real data); a solid colored area (a
+                                 # lake, a roof) fills most or all of it
+MAX_COLOR_CANDIDATES = 4
 
 PIXEL_EPSILONS = (1.5, 2.5, 4.0)          # contour simplification levels tried
 DP_WORLD_TOLERANCE = 5.0                  # world simplification used only for DP seed generation
@@ -140,13 +174,244 @@ ICP_MAX_ITERATIONS = 12
 ICP_MIN_POINTS = 4
 
 
-def extract_boundary_mask(img_rgb):
-    r = img_rgb[:, :, 0].astype(int)
-    g = img_rgb[:, :, 1].astype(int)
-    b = img_rgb[:, :, 2].astype(int)
-    mask = ((r > MAGENTA_MIN_CHANNEL) & (b > MAGENTA_MIN_CHANNEL) &
-            (g < r - MAGENTA_GAP) & (g < b - MAGENTA_GAP))
+def extract_boundary_mask(img_rgb, h_lo, h_hi,
+                           s_min=HSV_SAT_MIN, v_min=HSV_VAL_MIN):
+    """Binary mask of pixels within hue range [h_lo, h_hi] (OpenCV's
+    0-179 hue scale, wrapping past 179/0 if h_hi < h_lo - needed for red,
+    which straddles that boundary) and above the saturation/value
+    thresholds - i.e. "vivid" pixels of roughly this hue, which is what
+    isolates a boundary-line color from a photo's own much less
+    saturated natural tones (soil, water, muted vegetation)."""
+    hsv = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2HSV)
+    h, s, v = hsv[:, :, 0], hsv[:, :, 1], hsv[:, :, 2]
+    hue_ok = (h >= h_lo) & (h <= h_hi) if h_lo <= h_hi else (h >= h_lo) | (h <= h_hi)
+    mask = hue_ok & (s >= s_min) & (v >= v_min)
     return (mask.astype(np.uint8)) * 255
+
+
+def _circular_hue_distance(a, b, mod=180):
+    d = abs(a - b) % mod
+    return min(d, mod - d)
+
+
+def _hue_range_center(h_lo, h_hi, mod=180):
+    if h_lo <= h_hi:
+        return (h_lo + h_hi) / 2
+    return ((h_lo + h_hi + mod) / 2) % mod
+
+
+def detect_boundary_colors(img_rgb, max_candidates=MAX_COLOR_CANDIDATES):
+    """Find candidate boundary-line hue ranges automatically, rather
+    than assuming a single fixed color (see the constants above for
+    why). Scans overlapping HUE_BIN_WIDTH-degree hue bins restricted to
+    vivid (saturated/bright) pixels, and for each bin checks whether it
+    contains a contour large enough to plausibly be a boundary line
+    (largest_contour(), the same MIN_CONTOUR_DIM size filter used
+    everywhere else in this module) that isn't just a solid-filled
+    colored area (FILL_RATIO_MAX - see above). This also naturally
+    excludes small colored UI elements, e.g. the parcel-number text
+    labels' colored badges: confirmed on a real Nittedal screenshot
+    that a label badge can have *more total pixels* than the actual
+    boundary line at typical screenshot resolution, but a far smaller
+    bounding box - which is exactly what this filters on, not raw pixel
+    count. Returns a list of (h_lo, h_hi) hue ranges, largest first,
+    capped at max_candidates and de-duplicated (adjacent overlapping
+    bins that found the same real line only appear once) - empty if
+    nothing plausible was found at all."""
+    hsv_full = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2HSV)
+    found = []
+    for h_lo in range(0, 180, HUE_BIN_STEP):
+        h_hi = (h_lo + HUE_BIN_WIDTH - 1) % 180
+        hue_ok = (hsv_full[:, :, 0] >= h_lo) & (hsv_full[:, :, 0] <= h_hi) if h_lo <= h_hi \
+            else (hsv_full[:, :, 0] >= h_lo) | (hsv_full[:, :, 0] <= h_hi)
+        mask = (hue_ok & (hsv_full[:, :, 1] >= HSV_SAT_MIN) &
+                (hsv_full[:, :, 2] >= HSV_VAL_MIN)).astype(np.uint8) * 255
+        contour = largest_contour(mask)
+        if contour is None:
+            continue
+        x, y, w, h = cv2.boundingRect(contour)
+        fill_ratio = cv2.contourArea(contour) / (w * h) if w * h else 1.0
+        if fill_ratio > FILL_RATIO_MAX:
+            continue
+        found.append((w * h, h_lo, h_hi))
+
+    found.sort(key=lambda f: -f[0])
+    kept = []
+    for bbox_area, h_lo, h_hi in found:
+        if any(_circular_hue_distance(h_lo, kept_h_lo) < HUE_BIN_WIDTH
+               for _, kept_h_lo, _ in kept):
+            continue
+        kept.append((bbox_area, h_lo, h_hi))
+        if len(kept) >= max_candidates:
+            break
+    return [(h_lo, h_hi) for _, h_lo, h_hi in kept]
+
+
+# gnr/bnr label detection (see detect_label_seed_point) - norgeibilder.no
+# renders every visible parcel's own number label in the same red-on-white
+# style, regardless of property, so this range isn't specific to any one
+# property the way the boundary-line hue is. Verified distinct from both
+# this project's real boundary-line colors (magenta ~136-159, green
+# ~56-71): red wraps the 0/179 hue seam, nowhere near either.
+LABEL_HUE_LO, LABEL_HUE_HI = 170, 10    # wraps past 179/0, like extract_boundary_mask
+LABEL_SAT_MIN = 120
+LABEL_VAL_MIN = 150
+LABEL_GLYPH_MIN_AREA = 4        # px - drop sub-pixel-noise specks
+LABEL_GLYPH_MAX_AREA = 200      # px - drop anything glyph-sized text isn't (icons, thick lines)
+LABEL_GROUP_GAP_PX = 12         # max gap between glyphs still counted as one label
+ISOLATE_MASK_DILATE_PX = 2      # closes small antialiasing gaps before flood-filling
+ISOLATE_MAX_FILL_FRAC = 0.6     # reject a flood-fill that escaped through a line gap
+
+
+def _label_glyph_mask(img_rgb, s_min=LABEL_SAT_MIN, v_min=LABEL_VAL_MIN):
+    return extract_boundary_mask(img_rgb, LABEL_HUE_LO, LABEL_HUE_HI, s_min=s_min, v_min=v_min)
+
+
+def detect_label_seed_point(img_rgb, group_gap=LABEL_GROUP_GAP_PX):
+    """Find the pixel position of the *target* property's own gnr/bnr
+    label - not just any label, since every parcel visible in frame has
+    one (its neighbors' included). norgeibilder.no draws every visible
+    property's eiendomsgrenser boundary in the same overlay color,
+    touching/sharing edges with neighboring parcels (see README) - the
+    label position is what lets auto_extract_gcps isolate just the
+    target's own loop from that fused mesh via a seeded flood-fill,
+    rather than guessing from raw connected-component size.
+
+    Disambiguating which label is the target's own doesn't need OCR:
+    this project's whole manual-capture workflow always centers the
+    viewer on the target property before taking the screenshot (that's
+    the point of navigating to it first), so its label is reliably the
+    one closest to the image's own geometric center - verified directly
+    on 14/987 Nittedal's real screenshots, where the target's label
+    centroid landed within a few pixels of true image-center while a
+    neighboring parcel's own label sat far off at the frame edge.
+
+    Returns (x, y) in pixel coordinates, or None if no plausible label
+    was found (e.g. text too small/faint in a low-resolution historical
+    photo) - callers should fall back to the un-isolated mask."""
+    mask = _label_glyph_mask(img_rgb)
+    n, _, stats, centroids = cv2.connectedComponentsWithStats(mask, connectivity=8)
+    glyph_idx = [i for i in range(1, n)
+                 if LABEL_GLYPH_MIN_AREA <= stats[i, cv2.CC_STAT_AREA] <= LABEL_GLYPH_MAX_AREA]
+    if not glyph_idx:
+        return None
+
+    parent = {i: i for i in glyph_idx}
+
+    def find(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    def union(i, j):
+        ri, rj = find(i), find(j)
+        if ri != rj:
+            parent[ri] = rj
+
+    for a in range(len(glyph_idx)):
+        i = glyph_idx[a]
+        xi, yi, wi, hi = stats[i, :4]
+        for b in range(a + 1, len(glyph_idx)):
+            j = glyph_idx[b]
+            xj, yj, wj, hj = stats[j, :4]
+            if (xi - group_gap < xj + wj and xj - group_gap < xi + wi and
+                    yi - group_gap < yj + hj and yj - group_gap < yi + hi):
+                union(i, j)
+
+    groups = {}
+    for i in glyph_idx:
+        groups.setdefault(find(i), []).append(i)
+
+    height, width = img_rgb.shape[:2]
+    img_center = np.array([width / 2.0, height / 2.0])
+
+    best_center, best_dist = None, None
+    for members in groups.values():
+        if len(members) < 2:
+            continue  # a lone glyph-sized blob is more likely noise than a whole label
+        pts = centroids[members]
+        areas = stats[members, cv2.CC_STAT_AREA].astype(float)
+        center = np.average(pts, axis=0, weights=areas)
+        dist = float(np.hypot(*(center - img_center)))
+        if best_dist is None or dist < best_dist:
+            best_center, best_dist = center, dist
+
+    if best_center is None:
+        return None
+    return float(best_center[0]), float(best_center[1])
+
+
+def isolate_target_boundary_mask(boundary_mask, seed_xy, dilate_px=ISOLATE_MASK_DILATE_PX,
+                                  max_fill_frac=ISOLATE_MAX_FILL_FRAC):
+    """Restrict a boundary-color mask - which may include neighboring
+    parcels' touching/shared-edge boundary lines, since norgeibilder.no
+    draws every visible property's eiendomsgrenser in the same color,
+    not just the target's - to just the loop enclosing seed_xy. Works by
+    a seeded flood-fill of the *non*-boundary pixels: dilate the mask a
+    little (closes small antialiasing gaps in the line), flood-fill the
+    complement starting at the seed to find the one enclosed interior
+    region, then re-dilate that region and intersect it with the
+    original mask to recover exactly the boundary-colored pixels
+    immediately surrounding it - excluding any other parcel's line not
+    touching this specific interior, whether that's a separate closed
+    loop sharing an edge or a dangling arm cut off by the frame.
+
+    Returns the isolated mask (same shape as boundary_mask), or None if
+    the fill looks unreliable - escaped through a real gap in the line
+    and filled most of the frame, or the seed landed somewhere with no
+    nearby free pixel at all - so callers can fall back to the
+    un-isolated mask instead of trusting a bad isolation."""
+    height, width = boundary_mask.shape[:2]
+    kernel = np.ones((dilate_px * 2 + 1, dilate_px * 2 + 1), np.uint8)
+    walls = cv2.dilate(boundary_mask, kernel)
+
+    x = min(max(int(round(seed_xy[0])), 0), width - 1)
+    y = min(max(int(round(seed_xy[1])), 0), height - 1)
+    if walls[y, x]:
+        # The label should normally sit inside the property, away from
+        # its own line - but if it lands on/inside the dilated wall
+        # anyway, search an expanding neighborhood for a free pixel
+        # rather than give up outright.
+        found = False
+        for r in range(1, 15):
+            y0, y1 = max(0, y - r), min(height, y + r + 1)
+            x0, x1 = max(0, x - r), min(width, x + r + 1)
+            free = ~walls[y0:y1, x0:x1].astype(bool)
+            if free.any():
+                iy, ix = np.argwhere(free)[0]
+                y, x = y0 + iy, x0 + ix
+                found = True
+                break
+        if not found:
+            return None
+
+    fillable = (~walls.astype(bool)).astype(np.uint8)
+    _, comp_labels = cv2.connectedComponents(fillable, connectivity=4)
+    target_label = comp_labels[y, x]
+    if target_label == 0:
+        return None
+    interior = (comp_labels == target_label)
+
+    interior_area = int(interior.sum())
+    if interior_area == 0 or interior_area > max_fill_frac * width * height:
+        return None
+
+    interior_u8 = interior.astype(np.uint8) * 255
+    dilated_interior = cv2.dilate(interior_u8, kernel)
+    # Intersect with the *dilated* walls, not the original undilated
+    # mask: interior's own edge sits at walls' outer boundary (already
+    # dilate_px beyond the true line), so re-dilating interior by the
+    # same amount brings it back only to about walls' edge, not all the
+    # way back to the thin original mask's centerline pixels - verified
+    # directly (14/987 Nittedal, 2015): ANDing with boundary_mask
+    # produced zero overlap every time, while ANDing with walls (which
+    # interior is adjacent to by construction, before any dilation)
+    # reliably overlaps.
+    isolated = cv2.bitwise_and(dilated_interior, walls)
+    if not isolated.any():
+        return None
+    return isolated
 
 
 def largest_contour(mask):
@@ -348,7 +613,8 @@ def _candidate_alignments(pixel_angles, world_angles, skip_cost, top_k):
 
 def _icp_refine(seed_transform, pixel_pts, ring_tree, ring_coords,
                  max_iterations=ICP_MAX_ITERATIONS, initial_gate_m=ICP_INITIAL_GATE_M,
-                 min_gate_m=ICP_MIN_GATE_M, shrink=ICP_SHRINK, min_points=ICP_MIN_POINTS):
+                 min_gate_m=ICP_MIN_GATE_M, shrink=ICP_SHRINK, min_points=ICP_MIN_POINTS,
+                 dedupe_targets=False):
     """Iterative Closest Point: repeatedly project pixel_pts through the
     current transform, snap each to its nearest point on the property's
     actual (unsimplified) boundary ring, refit from the kept
@@ -358,8 +624,25 @@ def _icp_refine(seed_transform, pixel_pts, ring_tree, ring_coords,
     alignment even from quite poor/wrong seed transforms (RMSE >100m
     before refinement), as long as the seed is within the same rough
     ballpark (not, e.g., off by an order of magnitude in scale).
-    Returns (transform, rmse, max_err, world_pts, pixel_pts, errors) or
-    None if it never had enough points within the gate to fit."""
+
+    dedupe_targets: several distinct pixel points can snap to the very
+    same nearest ring vertex - e.g. a cluster of near-duplicate corner
+    candidates around one real corner, or a screenshot-frame crop
+    artifact landing near a real vertex (verified directly on 14/987
+    Nittedal: 4 separate pixel points all matched the same single world
+    vertex, and the resulting over-weighted fit's single worst residual,
+    3.77m, was the reported max error). Letting every one of them
+    separately pull the least-squares fit toward that one target
+    over-weights it and can visibly skew rotation/scale - if True, keep
+    only the closest pixel point per distinct world-ring target each
+    iteration. Off by default: on a well-conditioned fit (plenty of
+    spread-out real corners, e.g. every 123/9 Etnedal screenshot) it
+    makes no difference, but on a marginal one (few points to begin
+    with, e.g. several 14/987 Nittedal screenshots) discarding points
+    can tip a fit that would otherwise pass under the point-count floor
+    - auto_extract_gcps tries both and lets its usual
+    lowest-RMSE-that-passes-the-sanity-checks selection decide, the same
+    candidate-generation pattern used for DP-alignment seeds."""
     current = seed_transform
     gate = initial_gate_m
     pixel_arr = np.array(pixel_pts, dtype=float)
@@ -372,8 +655,20 @@ def _icp_refine(seed_transform, pixel_pts, ring_tree, ring_coords,
         keep = dists <= gate
         if int(keep.sum()) < min_points:
             break
-        mw = [tuple(ring_coords[i]) for i in idxs[keep]]
-        mp = [tuple(pixel_arr[i]) for i in np.nonzero(keep)[0]]
+        if dedupe_targets:
+            best_for_target = {}
+            for local_i in np.nonzero(keep)[0]:
+                ring_i = int(idxs[local_i])
+                d = dists[local_i]
+                if ring_i not in best_for_target or d < best_for_target[ring_i][0]:
+                    best_for_target[ring_i] = (d, local_i)
+            if len(best_for_target) < min_points:
+                break
+            kept = [i for _, i in best_for_target.values()]
+        else:
+            kept = np.nonzero(keep)[0]
+        mw = [tuple(ring_coords[idxs[i]]) for i in kept]
+        mp = [tuple(pixel_arr[i]) for i in kept]
         current, rmse, max_err, errors = fit_affine(mw, mp)
         result = (current, rmse, max_err, mw, mp, errors)
         gate = max(min_gate_m, gate * shrink)
@@ -504,66 +799,168 @@ def _generate_seeds(pixel_pts, pixel_closed, world_polygon, top_k_dp_seeds):
 
 
 def auto_extract_gcps(screenshot_path, world_polygon,
-                       pixel_epsilons=PIXEL_EPSILONS, top_k_dp_seeds=TOP_K_DP_SEEDS):
+                       pixel_epsilons=PIXEL_EPSILONS, top_k_dp_seeds=TOP_K_DP_SEEDS,
+                       boundary_color=None):
     """Returns (gcps_world, gcps_pixel, transform, rmse, max_err,
-    diagnostics) - the best-scoring ICP-refined fit across every seed
-    and contour simplification level tried - or raises ValueError with
-    a clear reason if no confident match is found at all."""
+    diagnostics) - the best-scoring ICP-refined fit across every color
+    candidate, seed, and contour simplification level tried - or raises
+    ValueError with a clear reason if no confident match is found at
+    all.
+
+    boundary_color: optional (h_lo, h_hi) hue range (OpenCV 0-179 scale)
+    to force a specific color instead of auto-detecting (see
+    detect_boundary_colors and main()'s --boundary-color, which accepts
+    a hex RGB string and converts it) - for the rare screenshot where
+    detection picks the wrong candidate, e.g. because two similarly
+    prominent vivid regions are both plausible line shapes."""
     img = np.array(Image.open(screenshot_path).convert("RGB"))
-    mask = extract_boundary_mask(img)
-    contour = largest_contour(mask)
-    if contour is None:
-        raise ValueError("no boundary-colored contour found (magenta threshold too strict, "
-                          "or the eiendomsgrenser layer wasn't on in this screenshot)")
+
+    if boundary_color is not None:
+        # The confirmed color can legitimately drift a bit from
+        # screenshot to screenshot - verified directly on 123/9
+        # Etnedal, whose real eiendomsgrenser magenta shifts from hue
+        # ~143 (its first four screenshots) to ~151 (its later four),
+        # straddling the edge of a single fixed hue bin's tolerance and
+        # making forcing one exact range fail outright on half the
+        # batch. Try the confirmed color first (the fast, normal path),
+        # then fall back to this screenshot's own detected candidates,
+        # closest-hue-first, so a real per-screenshot shift still finds
+        # the right line instead of failing loudly for no good reason.
+        own_candidates = [c for c in detect_boundary_colors(img) if c != boundary_color]
+        forced_center = _hue_range_center(*boundary_color)
+        own_candidates.sort(
+            key=lambda c: _circular_hue_distance(_hue_range_center(*c), forced_center))
+        color_candidates = [boundary_color] + own_candidates
+    else:
+        color_candidates = detect_boundary_colors(img)
+    if not color_candidates:
+        raise ValueError(
+            "no boundary-colored contour found in any hue - the eiendomsgrenser layer may not "
+            "have been on in this screenshot, or its line color is too faint/desaturated to "
+            "isolate automatically (try --boundary-color to force a specific color)")
 
     ring_coords = np.array(list(world_polygon.exterior.coords))
     ring_tree = cKDTree(ring_coords)
 
+    label_seed = detect_label_seed_point(img)
+
+    def best_fit_for_contour(contour, h_lo, h_hi):
+        """Search every epsilon/seed/dedupe combination for one already-
+        extracted contour, returning (best_local_or_None, attempts)."""
+        local_best = None
+        local_attempts = 0
+
+        for epsilon in pixel_epsilons:
+            pixel_pts, pixel_closed = simplify_contour(contour, img.shape, epsilon)
+            if len(pixel_pts) < 6:
+                continue
+
+            for seed_transform in _generate_seeds(pixel_pts, pixel_closed, world_polygon, top_k_dp_seeds):
+                for dedupe_targets in (False, True):
+                    local_attempts += 1
+                    icp_result = _icp_refine(seed_transform, pixel_pts, ring_tree, ring_coords,
+                                              dedupe_targets=dedupe_targets)
+                    if icp_result is None:
+                        continue
+                    transform, rmse, max_err, gcps_world, gcps_pixel, errors = icp_result
+                    if len(gcps_world) < ICP_MIN_POINTS:
+                        continue
+                    if not _is_isotropic(transform) or not _is_plausible_rotation(transform):
+                        continue
+
+                    if local_best is None or rmse < local_best[0]:
+                        diagnostics = {
+                            "epsilon": epsilon, "n_pixel_corners": len(pixel_pts),
+                            "pixel_closed": pixel_closed, "n_gcp": len(gcps_world),
+                            "contour_bbox": cv2.boundingRect(contour),
+                            "hue_range": (h_lo, h_hi), "dedupe_targets": dedupe_targets,
+                        }
+                        local_best = (rmse, max_err, gcps_world, gcps_pixel, transform, diagnostics)
+        return local_best, local_attempts
+
+    def best_fit_for_color(h_lo, h_hi):
+        """Try the target property's own isolated boundary loop first
+        (see isolate_target_boundary_mask - excludes neighboring
+        parcels' touching/shared-edge lines, which the raw whole-mask
+        contour doesn't distinguish from the target's own), falling
+        back to the raw whole-mask contour if isolation isn't available
+        or doesn't work out for this screenshot. Returns
+        (best_local_or_None, attempts, contour_found)."""
+        mask = extract_boundary_mask(img, h_lo, h_hi)
+        attempts = 0
+
+        if label_seed is not None:
+            isolated = isolate_target_boundary_mask(mask, label_seed)
+            if isolated is not None:
+                contour = largest_contour(isolated)
+                if contour is not None:
+                    local_best, local_attempts = best_fit_for_contour(contour, h_lo, h_hi)
+                    attempts += local_attempts
+                    if local_best is not None:
+                        local_best[5]["label_seeded"] = True
+                        return local_best, attempts, True
+
+        contour = largest_contour(mask)
+        if contour is None:
+            return None, attempts, attempts > 0
+        local_best, local_attempts = best_fit_for_contour(contour, h_lo, h_hi)
+        attempts += local_attempts
+        if local_best is not None:
+            local_best[5]["label_seeded"] = False
+        return local_best, attempts, True
+
     best = None
     attempts = 0
-    for epsilon in pixel_epsilons:
-        pixel_pts, pixel_closed = simplify_contour(contour, img.shape, epsilon)
-        if len(pixel_pts) < 6:
+    tried_any_contour = False
+    for h_lo, h_hi in color_candidates:
+        local_best, local_attempts, contour_found = best_fit_for_color(h_lo, h_hi)
+        attempts += local_attempts
+        tried_any_contour = tried_any_contour or contour_found
+        if local_best is None:
             continue
+        # boundary_color=None (free auto-detection): every candidate is
+        # equally untrusted, so search all of them and let the lowest
+        # RMSE that passes the sanity checks win, same as always.
+        # boundary_color given: color_candidates[0] is the confirmed,
+        # trusted color and the rest are only a drift-tolerance fallback
+        # for when it fails outright (see the fallback's docstring
+        # above) - competing a fallback hue against an already-working
+        # confirmed-color fit purely on RMSE risks a razor-thin, wrong
+        # win (verified directly: 14/987 Nittedal's 2017 screenshot had
+        # a stray hue candidate beat the correct green line by 0.01m
+        # RMSE while being visibly worse - 18.9 deg of implied rotation
+        # vs. 5.8 deg). So once *any* candidate produces a valid fit,
+        # stop rather than keep shopping for a lower RMSE elsewhere.
+        if best is None or (boundary_color is None and local_best[0] < best[0]):
+            best = local_best
+        if boundary_color is not None:
+            break
 
-        for seed_transform in _generate_seeds(pixel_pts, pixel_closed, world_polygon, top_k_dp_seeds):
-            attempts += 1
-            icp_result = _icp_refine(seed_transform, pixel_pts, ring_tree, ring_coords)
-            if icp_result is None:
-                continue
-            transform, rmse, max_err, gcps_world, gcps_pixel, errors = icp_result
-            if len(gcps_world) < ICP_MIN_POINTS:
-                continue
-            if not _is_isotropic(transform) or not _is_plausible_rotation(transform):
-                continue
-
-            if best is None or rmse < best[0]:
-                diagnostics = {
-                    "epsilon": epsilon, "n_pixel_corners": len(pixel_pts),
-                    "pixel_closed": pixel_closed, "n_gcp": len(gcps_world),
-                    "contour_bbox": cv2.boundingRect(contour),
-                }
-                best = (rmse, max_err, gcps_world, gcps_pixel, transform, diagnostics)
-
+    if not tried_any_contour:
+        raise ValueError(
+            f"no boundary-colored contour found (tried hue ranges {color_candidates} - the "
+            f"eiendomsgrenser layer may not have been on in this screenshot)")
     if best is None:
         raise ValueError(
             f"no confident GCP alignment found (tried {attempts} seed transforms across "
-            f"the contour simplification grid) - contour bbox may be wrong, or too few real "
-            f"corners visible")
+            f"{len(color_candidates)} color candidate(s) and the contour simplification grid) "
+            f"- contour bbox may be wrong, or too few real corners visible")
 
     rmse, max_err, gcps_world, gcps_pixel, transform, diagnostics = best
     return gcps_world, gcps_pixel, transform, rmse, max_err, diagnostics
 
 
-def fit_year(prop, outdir, basename, screenshot_path, year):
+def fit_year(prop, outdir, basename, screenshot_path, year, boundary_color=None):
     gcps_world, gcps_pixel, transform, rmse, max_err, diag = auto_extract_gcps(
-        screenshot_path, prop.polygon)
+        screenshot_path, prop.polygon, boundary_color=boundary_color)
 
     img = np.array(Image.open(screenshot_path).convert("RGB"))
     ok, reasons, pixel_size = verify_registration(transform, rmse, img.shape, prop.polygon)
 
-    print(f"  {year}: {diag['n_gcp']} ICP-matched GCPs (epsilon={diag['epsilon']:g}px), "
-          f"RMSE={rmse:.2f}m max_err={max_err:.2f}m, pixel_size~{pixel_size:.3f}m/px")
+    seeded = "label-isolated" if diag.get("label_seeded") else "whole-mask"
+    print(f"  {year}: {diag['n_gcp']} ICP-matched GCPs (epsilon={diag['epsilon']:g}px, "
+          f"hue={diag['hue_range']}, {seeded}), RMSE={rmse:.2f}m max_err={max_err:.2f}m, "
+          f"pixel_size~{pixel_size:.3f}m/px")
     if not ok:
         print(f"    REJECTED - {'; '.join(reasons)}")
         return None
@@ -603,6 +1000,79 @@ def fit_year(prop, outdir, basename, screenshot_path, year):
     return out_path
 
 
+def _parse_hex_color(s):
+    """'ff00ff' or '#ff00ff' -> (h_lo, h_hi) hue range, centered on that
+    color's exact OpenCV hue with +-HUE_BIN_WIDTH/2 tolerance - for
+    --boundary-color, forcing a specific color instead of auto-detecting
+    (see detect_boundary_colors)."""
+    s = s.lstrip("#")
+    if len(s) != 6:
+        raise argparse.ArgumentTypeError(f"--boundary-color must be 6 hex digits (RRGGBB), got {s!r}")
+    try:
+        r, g, b = (int(s[i:i + 2], 16) for i in (0, 2, 4))
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"--boundary-color must be 6 hex digits (RRGGBB), got {s!r}")
+    hue = int(cv2.cvtColor(np.uint8([[[r, g, b]]]), cv2.COLOR_RGB2HSV)[0, 0, 0])
+    half = HUE_BIN_WIDTH // 2
+    return ((hue - half) % 180, (hue + half) % 180)
+
+
+_HUE_NAMES = [
+    (5, "red"), (18, "orange"), (33, "yellow"), (75, "green"),
+    (95, "cyan"), (130, "blue"), (155, "magenta/pink"), (172, "red/pink"),
+]
+
+
+def _describe_hue_range(h_lo, h_hi):
+    """(h_lo, h_hi) -> a human-readable "name (hex)" string, for showing
+    a detected color to the user in a way that's actually recognizable
+    (a raw OpenCV hue number like 70 means nothing at a glance)."""
+    center = ((h_lo + h_hi) / 2) if h_hi >= h_lo else (((h_lo + h_hi + 180) / 2) % 180)
+    name = next((n for cutoff, n in _HUE_NAMES if center <= cutoff), "red")
+    rgb = cv2.cvtColor(np.uint8([[[int(center), 255, 255]]]), cv2.COLOR_HSV2RGB)[0, 0]
+    return f"{name} (#{rgb[0]:02x}{rgb[1]:02x}{rgb[2]:02x})"
+
+
+def confirm_boundary_color(candidates, auto_yes=False):
+    """Interactively confirm the auto-detected boundary-line color
+    before proceeding, rather than silently trusting detection -
+    prompts with the top candidate, and on "no" offers the next one
+    (detect_boundary_colors already ranks them by how convincingly
+    line-shaped their largest contour is), or lets the user type a hex
+    color directly. Returns the confirmed (h_lo, h_hi), or None if the
+    user aborts (empty candidate list, or explicitly declines all of
+    them). auto_yes=True (--yes) skips the prompt and accepts the top
+    candidate outright, for non-interactive/scripted use."""
+    if not candidates:
+        return None
+    if auto_yes:
+        print(f"Boundary color (auto-accepted, --yes): {_describe_hue_range(*candidates[0])}")
+        return candidates[0]
+
+    remaining = list(candidates)
+    while remaining:
+        h_lo, h_hi = remaining.pop(0)
+        answer = input(
+            f"Detected boundary-line color: {_describe_hue_range(h_lo, h_hi)} - "
+            f"use this for the whole batch? [Y/n, or type a hex color like ff00ff]: "
+        ).strip()
+        if answer == "" or answer.lower() in ("y", "yes"):
+            return (h_lo, h_hi)
+        if answer.lower() in ("n", "no"):
+            continue
+        try:
+            return _parse_hex_color(answer)
+        except argparse.ArgumentTypeError as e:
+            print(f"  {e} - try again.")
+            remaining.insert(0, (h_lo, h_hi))
+
+    print("No candidate color confirmed.")
+    hex_answer = input("Type a hex color directly (e.g. ff00ff), or leave blank to abort: ").strip()
+    if not hex_answer:
+        return None
+    return _parse_hex_color(hex_answer)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--kommune", required=True)
@@ -611,6 +1081,14 @@ def main():
     ap.add_argument("--outdir", default=None)
     ap.add_argument("--years", type=int, nargs="+", default=None,
                      help="only these years (default: every un-fitted raw screenshot found)")
+    ap.add_argument("--boundary-color", type=_parse_hex_color, default=None,
+                     help="force a specific eiendomsgrenser line color instead of "
+                          "auto-detecting/confirming interactively - a 6-digit hex RGB, "
+                          "e.g. ff00ff for magenta or 08bc46 for green")
+    ap.add_argument("--yes", action="store_true",
+                     help="skip the interactive color-confirmation prompt, auto-accepting "
+                          "the top auto-detected candidate (for non-interactive/scripted use; "
+                          "ignored if --boundary-color is also given)")
     args = ap.parse_args()
 
     prop = fetch_property(args.kommune, args.gnr, args.bnr)
@@ -629,6 +1107,24 @@ def main():
         print("Nothing to do - no un-fitted input screenshots found.")
         return
 
+    # Color is confirmed once (from the first available screenshot) and
+    # reused for the whole batch, not re-detected/re-asked per year -
+    # confirmed on real data that norgeibilder.no's eiendomsgrenser color
+    # is consistent across every screenshot of the same property (both
+    # Etnedal's magenta and Nittedal's green held across all years
+    # tested), even though it differs *between* properties.
+    boundary_color = args.boundary_color
+    if boundary_color is None:
+        first_year = next((y for y in years if y in input_screenshots), None)
+        if first_year is not None:
+            img = np.array(Image.open(input_screenshots[first_year]).convert("RGB"))
+            candidates = detect_boundary_colors(img)
+            boundary_color = confirm_boundary_color(candidates, auto_yes=args.yes)
+            if boundary_color is None:
+                print("No boundary color confirmed - aborting "
+                      "(pass --boundary-color to skip this prompt).")
+                return
+
     write_boundary_geojson(prop, outdir, basename)
     print(f"Auto-fitting {len(years)} year(s): {years}")
     ok, failed = [], []
@@ -638,7 +1134,8 @@ def main():
             failed.append(year)
             continue
         try:
-            result = fit_year(prop, outdir, basename, input_screenshots[year], year)
+            result = fit_year(prop, outdir, basename, input_screenshots[year], year,
+                               boundary_color=boundary_color)
             (ok if result else failed).append(year)
         except ValueError as e:
             print(f"  {year}: FAILED - {e}")

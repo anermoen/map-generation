@@ -24,21 +24,21 @@ make sense at this project's current pre-client, idea-testing stage (no
 budget for direct costs, no client yet to justify formal membership).
 Kartverket's own browser viewer (norgeibilder.no) is free to use for
 anyone, though, and already shows the eiendomsgrenser (property
-boundary) drawn on each historical photo - `georeference_screenshot.py`
-uses that boundary's already-known real-world coordinates to
-georeference a screenshot of it directly, sidestepping the token
-requirement entirely for a lower-accuracy but immediately usable result
-(see "Georeferencing a norgeibilder.no screenshot" below), and
-`auto_gcp.py` automates that whole matching process (see "Automatic
-georeferencing" below) so a batch of screenshots can each be fit without
-a human clicking corners. **Working end to end, for real**: all 8
-manually-captured screenshots on hand for 123/9 (1956, 1970, 1986, 1991,
-2006, 2011, 2016, 2025) are georeferenced, 7 of them fully automatically
-(RMSE 0.9-2.5 m each) and one (2006, whose tight crop violates one of
-the automatic method's assumptions - see "Automatic georeferencing")
-via the manual fallback (RMSE 0.97 m) - `plot_overlay.py`'s batch mode
-(see "Per-property output folder" below) regenerates every overlay in
-one command.
+boundary) drawn on each historical photo - that boundary's already-known
+real-world coordinates are enough to georeference a screenshot of it
+directly, sidestepping the token requirement entirely for a
+lower-accuracy but immediately usable result (see "Georeferencing a
+norgeibilder.no screenshot" below). **Start with `auto_gcp.py`** - it
+does this fully automatically, batching through every screenshot in a
+property's folder with no human clicking corners; `georeference_screenshot.py`
+is the manual fallback for whichever specific years it can't confidently
+fit on its own. **Working end to end, for real**: all 8
+manually-captured screenshots on hand for 123/9 (1958, 1970, 1986, 1991,
+2006, 2011, 2016, 2025) are georeferenced fully automatically via
+`auto_gcp.py` (RMSE 0.9-2.5 m each) - `plot_overlay.py`'s batch mode (see
+"Per-property output folder" below) regenerates every overlay in one
+command. 14/987 Nittedal similarly has all 14 of its screenshots fit
+fully automatically (RMSE 0.04-1.7 m).
 
 ## `property.py`: cadastral boundary lookup
 
@@ -170,85 +170,76 @@ which is the actual gate.
 
 ## Georeferencing a norgeibilder.no screenshot (no token needed)
 
-`georeference_screenshot.py` is today's actual path forward, chosen
-because none of the three routes to a real GeoID token above fit this
-project's current stage (see "Status"). norgeibilder.no's browser
-viewer needs no login and lets you pick any historical "prosjekt"
-(year) with the eiendomsgrenser (property boundary) overlay turned on -
-so a screenshot already has the property's boundary drawn on it, in
-exactly the shape and position property.py already knows the real-world
-coordinates of. That's enough to georeference the screenshot directly:
-match a handful of recognizable boundary corners in the image to their
-known (easting, northing), and fit the same kind of 6-parameter affine
-("world file") transform used to georeference scanned paper maps.
+norgeibilder.no's browser viewer needs no login and lets you pick any
+historical "prosjekt" (year) with the eiendomsgrenser (property
+boundary) overlay turned on - so a screenshot already has the
+property's boundary drawn on it, in exactly the shape and position
+property.py already knows the real-world coordinates of. That's enough
+to georeference the screenshot directly: match boundary corners in the
+image to their known (easting, northing), and fit the same kind of
+6-parameter affine ("world file") transform used to georeference
+scanned paper maps - sidestepping the WMS token requirement entirely
+(see "Blocker" above), chosen because none of the three routes to a
+real GeoID token fit this project's current stage.
 
-This is deliberately approximate, not a substitute for a real WMS
-download - accuracy is limited by screenshot resolution (whatever zoom
-level the browser was at, not the source photo's native resolution) and
-how precisely boundary corners can be clicked. The `fit` step reports
-its own residual error in meters, so the accuracy achieved is known, not
-assumed. 123/9's boundary is a genuinely complex shape (221 original
-vertices - it follows a stream for much of its length), so
-`list-vertices` simplifies it down to a manageable, labeled set of real
-corners first, highlighting the four cardinal extremes as usually the
-easiest to identify unambiguously even in a low-resolution screenshot.
-For closely-spaced candidate corners, identify them by prediction and
-verification rather than guessing blind: fit a preliminary transform
-from a few unambiguous points (e.g. the single northmost vertex - unique
-on the whole polygon), use it to predict where other vertices should
-fall in the image, and check each prediction against the actual
-screenshot before accepting it as a GCP.
+Two scripts do this, and **they take their arguments differently** -
+worth knowing before you type anything, since using one script's
+command shape on the other fails with a confusing error rather than
+just working:
 
-Workflow:
+- **`auto_gcp.py` - start here.** No subcommand - `--kommune`/`--gnr`/
+  `--bnr` go straight on the command line:
+  `python3 auto_gcp.py --kommune Etnedal --gnr 123 --bnr 9`. Batches
+  through every un-fitted screenshot in the property's folder
+  automatically.
+- **`georeference_screenshot.py` - the fallback**, only for whichever
+  specific years `auto_gcp.py` couldn't confidently fit on its own.
+  This one *is* subcommand-based (like `git`): the first argument must
+  be `list-vertices`, `pick`, or `fit`, with `--kommune`/`--gnr`/
+  `--bnr` coming after that -
+  `python3 georeference_screenshot.py list-vertices --kommune Etnedal
+  --gnr 123 --bnr 9`. Running `python3 georeference_screenshot.py
+  Etnedal 123 9` (i.e. property.py/auto_gcp.py's style, without a
+  subcommand) fails with `error: argument command: invalid choice:
+  'Etnedal'` - argparse is trying to match "Etnedal" against
+  `{list-vertices,pick,fit}` and failing, not rejecting the property.
 
-    python3 georeference_screenshot.py list-vertices --kommune Etnedal --gnr 123 --bnr 9
-    # -> prints/plots numbered candidate corners; compare its shape against
-    #    your screenshot's eiendomsgrenser line to identify matching corners
-
-    python3 georeference_screenshot.py pick --screenshot photo_2016.png
-    # -> click each recognizable corner; pixel (x,y) prints to console
-    #    (run on your own machine - needs a display)
-
-    python3 georeference_screenshot.py fit --kommune Etnedal --gnr 123 --bnr 9 \
-        --screenshot photo_2016.png --year 2016 \
-        --gcp 0:209:815 --gcp 6:1718:1083 --gcp 13:1104:2545 --gcp 19:474:2116
-    # -> fits the transform, reports RMSE, writes a tagged GeoTIFF +
-    #    manifest.json entry in the same format download_images.py uses
-
-Needs at least 3 GCPs (the minimum for a 2D affine fit); 4+, well spread
-around the property and not collinear, both improves the fit and gives a
-meaningful error estimate (with exactly 3 the fit is mathematically
-exact through all three points regardless of true accuracy, so its
-reported RMSE is ~0 by construction, not a real check).
-
-**Verified two ways**: first end-to-end with a synthetic test screenshot
-(the property boundary rendered at a known 0.5 m/pixel, 2-degree-rotated
-transform, fed back through `list-vertices` + `fit`) - recovered the
-exact known transform to numerical precision (RMSE ~1e-5 m), confirming
-the affine-fit math and the GeoTIFF/manifest writing both work
-correctly. Then for real: a real 2025 screenshot fit with 5 GCPs
-identified by the predict-and-verify method above gave RMSE = 3.75 m
-(max error 6.65 m) on a ~1.3 m/pixel image - about 3 pixels of error -
-and `plot_overlay.py`'s output (boundary fetched fresh from the live
-WFS, overlaid on the real photo) lines up almost exactly with the
-boundary already drawn into the photo by norgeibilder.no itself.
-
-## Automatic georeferencing (`auto_gcp.py`)
-
-The manual workflow above (`list-vertices` / `pick` / `fit`) needs a
-human to identify which boundary corner in the screenshot is which
-known vertex. `auto_gcp.py` automates that matching, so a whole batch of
-screenshots can each be fit without anyone clicking corners:
+### Automatic (`auto_gcp.py`) - start here
 
     python3 auto_gcp.py --kommune Etnedal --gnr 123 --bnr 9
     # -> for every raw input screenshot found that isn't already in
     #    manifest.json, auto-extract GCPs, fit, and report RMSE/quality
 
-Same color-threshold-and-contour extraction as the manual workflow, but
-the corner-matching step went through two real, tested-and-discarded
-designs before landing on one that actually works reliably - worth
-recording, since both failures are the kind of thing that looks
-plausible until checked against real data:
+**Boundary color is auto-detected, not hardcoded.** norgeibilder.no's
+property-boundary overlay isn't always the same color - verified
+directly on this project's real screenshots: Etnedal's is magenta,
+Nittedal's is green. `auto_gcp.py` scans the first available screenshot
+in HSV space for a plausible boundary color (a thin, large-bounding-box,
+mostly-unfilled contour - filtering out small colored UI elements like
+parcel-number label badges, which can have *more* raw pixels than the
+actual boundary line but a much smaller bounding box and a high fill
+ratio) and proposes up to `MAX_COLOR_CANDIDATES` candidates, ranked most
+likely first. Rather than silently trusting the top candidate, it asks
+for interactive confirmation before running the batch:
+
+    Detected boundary color candidate 1/3: green (#08bc46)
+    Use this color? [y]es / [n]o, try next / [hex color, e.g. #ff00ff]:
+
+Answer `y` to accept, `n` to see the next candidate, or type a hex color
+directly if none of the auto-detected candidates look right. The
+confirmed color is reused for every year in the batch (verified: it's
+consistent across all years for a given property, since the *viewer's*
+overlay color doesn't change with the underlying photo). For
+non-interactive/scripted runs, skip the prompt with `--yes` (accepts the
+top-ranked candidate automatically) or force a specific color up front
+with `--boundary-color RRGGBB` (skips detection entirely):
+
+    python3 auto_gcp.py --kommune Nittedal --gnr 14 --bnr 987 --boundary-color 08bc46 --yes
+
+The corner-matching step (once the boundary mask is extracted) went
+through two real, tested-and-discarded designs before landing on one
+that actually works reliably - worth recording, since both failures are
+the kind of thing that looks plausible until checked against real data:
 
 1. **A rigid slide of the two corner sequences against each other**
    (matching pixel corners to world vertices index-by-index at a fixed
@@ -294,19 +285,156 @@ all ~0 degrees - norgeibilder.no's viewer has no rotation control a
 user could trigger even by accident; observed failures ranged
 25-160 degrees).
 
-**Verified on all 8 of this project's real screenshots** (1956, 1970,
-1986, 1991, 2006, 2011, 2016, 2025): 7 fit automatically with RMSE
-0.9-2.5 m (visually confirmed correct via `plot_overlay.py` for every
-one, not just spot-checked). 2006 is the one exception - its screenshot
-is cropped tightly enough that the whole property isn't visible in
-frame, violating the bounding-box seed strategy's assumption, and no
-automatic fit passed the checks above - georeference_screenshot.py's
-manual workflow handled it instead (RMSE 0.97 m). This is the intended
-fallback for that situation, not a bug: `auto_gcp.py` fails loudly (an
-error, or reporting no confident match) rather than silently accepting
-a wrong registration, and `manifest.json`'s `georeferencing_method`
+Two more real failure modes surfaced later, both from visually comparing
+the *fitted* overlay against the live boundary rather than trusting a
+passing RMSE/rotation/scale check alone - worth recording, since both
+fits "succeeded" by every check above and were still visibly wrong:
+
+1. **Duplicate ICP correspondences over-weighting one point.** Several
+   distinct pixel corners can snap to the *same* nearest point on the
+   world boundary ring in one ICP iteration - e.g. a cluster of
+   near-duplicate corner candidates around one real corner, or (on
+   14/987 Nittedal, whose screenshots crop the property on two frame
+   edges at once, not the one edge typical of 123/9 Etnedal's) a
+   crop-artifact point landing near a real vertex. Feeding several
+   pixel points against one identical world target into the affine
+   least-squares fit over-weights that target and skews rotation/scale
+   - verified directly for Nittedal's 2025 screenshot: 4 separate pixel
+   points all matched the same world vertex, and the resulting fit's
+   single worst residual (3.77 m, the reported max error) came from
+   exactly that point. Fixed by trying ICP both ways each iteration -
+   once keeping every within-gate match, once keeping only the closest
+   pixel point per distinct world target - as two more candidate fits
+   in the same "generate candidates, let the lowest-RMSE-that-passes-
+   the-checks win" pattern already used for DP-alignment seeds.
+2. **A confirmed boundary color can still drift screenshot to
+   screenshot.** The interactive color confirmation (see above) checks
+   once per property and reuses that exact hue range for the whole
+   batch - but the real rendered color isn't perfectly constant across
+   a multi-decade screenshot set: verified directly that Etnedal's
+   magenta measures hue ~143 in its earlier screenshots and ~151 in its
+   later ones, and forcing one exact range made every one of the
+   later ones fail outright. Fixed by falling back to that screenshot's
+   own detected candidates (closest-hue-first) whenever the confirmed
+   exact range finds nothing - but only as a fallback, tried strictly
+   after the confirmed color, and only when the confirmed color found
+   *no* valid fit at all: letting a fallback hue compete on raw RMSE
+   once the confirmed color already succeeded let a wrong-hue candidate
+   beat the correct line by 0.01 m RMSE on one screenshot while being
+   visibly worse (18.9 degrees of implied rotation vs. 5.8).
+3. **Neighboring parcels' boundaries are drawn in the same color and
+   fused into the same contour.** norgeibilder.no's eiendomsgrenser
+   layer draws *every* visible parcel's boundary in one overlay color,
+   not just the target property's, and adjacent parcels share edges -
+   so `largest_contour()`'s "biggest connected blob of the boundary
+   color" is often not the target's own polygon but a mesh of several
+   parcels fused together. Confirmed directly on 14/987 Nittedal: the
+   single largest connected component of the boundary mask spanned
+   (0, 0, 498, 590) in a 498x590 image - the *entire* frame - for a lot
+   only ~40 m across, and the true source of the moderate-but-real
+   rotation/scale-anisotropy left over from fixes 1-2 above (5-9 degrees
+   on several years, still under the sanity thresholds but visibly
+   wrong once you compare against the live boundary, not just a
+   passing RMSE). Fixed with a real preprocessing stage: every visible
+   parcel's own gnr/bnr number is rendered on it in the same
+   distinctive style (red text, white halo) - not just the target's,
+   its neighbors' too - but this project's manual-capture workflow
+   always centers the viewer on the target property first, so its
+   label is reliably the one closest to the screenshot's own geometric
+   center (verified directly: within a few pixels of true image-center
+   on every real screenshot tested, while a neighboring parcel's own
+   label sat far off at the frame edge). `detect_label_seed_point()`
+   finds it (no OCR needed - just the same HSV color-thresholding
+   technique used for the boundary line itself, then picking whichever
+   detected text blob is closest to center), and
+   `isolate_target_boundary_mask()` uses it to seed a flood-fill of the
+   *non*-boundary pixels, walled in by the boundary mask (dilated a
+   couple of pixels first, to close small antialiasing gaps in the
+   line) - the one enclosed interior region reached from that seed is,
+   by construction, only the target's own loop, immune to whatever
+   shape its neighbors' fused-on boundaries take. Tried as a preferred
+   first tier ahead of the old whole-mask contour, same tiering
+   rationale as fix 2: falls back to the old approach if no label is
+   found (e.g. text too faint in a low-resolution historical photo) or
+   the isolated region doesn't produce a valid fit, rather than
+   compete the two on raw RMSE.
+
+**Verified on both properties' full real screenshot sets**: all 8 of
+123/9 Etnedal's (1958, 1970, 1986, 1991, 2006, 2011, 2016, 2025) and all
+14 of 14/987 Nittedal's (1946, 1969, 1976, 1986, 2002, 2006, 2009, 2013,
+2015, 2017, 2019, 2021, 2023, 2025) fit automatically, visually
+confirmed correct via `plot_overlay.py` for every one, not just
+spot-checked. Fix 3 above took Nittedal from 13/14 to a genuine 14/14 -
+its previous holdout, 2002 (cropped tightly enough that the whole
+property isn't visible in frame, violating the bounding-box seed
+strategy's assumption) - now isolates cleanly too; RMSE across
+Nittedal's label-isolated years dropped to 0.04-0.68 m (rotation under
+1 degree on 12 of 13 of them), down from 0.1-1.8 m (rotation up to
+9 degrees) beforehand. `auto_gcp.py` still fails loudly (an error, or
+reporting no confident match) rather than silently accepting a wrong
+registration on whichever year, someday, defeats all of the above -
+`georeference_screenshot.py`'s manual workflow (below) is the intended
+fallback for that case, and `manifest.json`'s `georeferencing_method`
 field always records which path (`automatic_gcp_extraction` vs.
 `manual_gcp_affine_fit`) produced each year's fit.
+
+### Manual fallback (`georeference_screenshot.py`)
+
+Only needed for a year `auto_gcp.py` couldn't confidently fit on its
+own (above) - currently neither of this project's two real properties
+has any (all 8 of 123/9 Etnedal's and all 14 of 14/987 Nittedal's fit
+automatically), though a low-quality or unusually-cropped screenshot
+could still land here for a property not yet tested.
+Deliberately approximate, not a substitute for a real WMS download -
+accuracy is limited by screenshot resolution (whatever zoom level the
+browser was at, not the source photo's native resolution) and how
+precisely boundary corners can be clicked. The `fit` step reports its
+own residual error in meters, so the accuracy achieved is known, not
+assumed. 123/9's boundary is a genuinely complex shape (221 original
+vertices - it follows a stream for much of its length), so
+`list-vertices` simplifies it down to a manageable, labeled set of real
+corners first, highlighting the four cardinal extremes as usually the
+easiest to identify unambiguously even in a low-resolution screenshot.
+For closely-spaced candidate corners, identify them by prediction and
+verification rather than guessing blind: fit a preliminary transform
+from a few unambiguous points (e.g. the single northmost vertex - unique
+on the whole polygon), use it to predict where other vertices should
+fall in the image, and check each prediction against the actual
+screenshot before accepting it as a GCP.
+
+Workflow (subcommand first - see the CLI-shape callout above):
+
+    python3 georeference_screenshot.py list-vertices --kommune Etnedal --gnr 123 --bnr 9
+    # -> prints/plots numbered candidate corners; compare its shape against
+    #    your screenshot's eiendomsgrenser line to identify matching corners
+
+    python3 georeference_screenshot.py pick --screenshot photo_2016.png
+    # -> click each recognizable corner; pixel (x,y) prints to console
+    #    (run on your own machine - needs a display)
+
+    python3 georeference_screenshot.py fit --kommune Etnedal --gnr 123 --bnr 9 \
+        --screenshot photo_2016.png --year 2016 \
+        --gcp 0:209:815 --gcp 6:1718:1083 --gcp 13:1104:2545 --gcp 19:474:2116
+    # -> fits the transform, reports RMSE, writes a tagged GeoTIFF +
+    #    manifest.json entry in the same format download_images.py uses
+
+Needs at least 3 GCPs (the minimum for a 2D affine fit); 4+, well spread
+around the property and not collinear, both improves the fit and gives a
+meaningful error estimate (with exactly 3 the fit is mathematically
+exact through all three points regardless of true accuracy, so its
+reported RMSE is ~0 by construction, not a real check).
+
+**Verified two ways**: first end-to-end with a synthetic test screenshot
+(the property boundary rendered at a known 0.5 m/pixel, 2-degree-rotated
+transform, fed back through `list-vertices` + `fit`) - recovered the
+exact known transform to numerical precision (RMSE ~1e-5 m), confirming
+the affine-fit math and the GeoTIFF/manifest writing both work
+correctly. Then for real: a real 2025 screenshot fit with 5 GCPs
+identified by the predict-and-verify method above gave RMSE = 3.75 m
+(max error 6.65 m) on a ~1.3 m/pixel image - about 3 pixels of error -
+and `plot_overlay.py`'s output (boundary fetched fresh from the live
+WFS, overlaid on the real photo) lines up almost exactly with the
+boundary already drawn into the photo by norgeibilder.no itself.
 
 ## Per-property output folder
 
@@ -329,17 +457,19 @@ mode**: it scans the folder for both already-georeferenced years (in
 `manifest.json`) and raw screenshots named as above, regenerates the
 overlay PNG for every already-georeferenced year in one go, and reports
 which raw screenshots don't have a fit yet (fitting itself still needs
-GCPs identified per image via `list-vertices`/`pick`/`fit` - not
-something this step does on its own):
+`auto_gcp.py` run first - and, for whichever years that can't
+confidently fit, `georeference_screenshot.py`'s manual `list-vertices`/
+`pick`/`fit` workflow - not something this step does on its own):
 
     python3 plot_overlay.py --kommune Etnedal --gnr 123 --bnr 9
     # 123-9-Etnedal: 1 georeferenced year(s), 8 raw input screenshot(s) found.
     #   2025: saved 123-9-Etnedal/123-9-Etnedal_2025_screenshot_overlay.png
     #
     # Raw screenshots found with no georeferenced fit yet - run
-    # georeference_screenshot.py's list-vertices/pick/fit workflow for these
-    # before an overlay can be made:
-    #   1956: 123-9-Etnedal/123-9-Etnedal-1956.png
+    # auto_gcp.py (or, if it can't confidently fit a given year,
+    # georeference_screenshot.py's list-vertices/pick/fit workflow) for
+    # these before an overlay can be made:
+    #   1958: 123-9-Etnedal/123-9-Etnedal-1958.png
     #   1970: 123-9-Etnedal/123-9-Etnedal-1970.png
     #   ...
 
@@ -359,9 +489,42 @@ something this step does on its own):
 | `property.py` | Fetch a cadastral property boundary by kommune + gnr/bnr; `property_code()` names the per-property output folder |
 | `imagery_search.py` | Find which Norge i Bilder projects actually cover a property, by year |
 | `download_images.py` | Needs a GeoID token (see "Blocker") - fetches one GeoTIFF per confirmed year via the proper WMS |
-| `georeference_screenshot.py` | Manual fallback - georeferences a screenshot from human-identified GCPs (`list-vertices` / `pick` / `fit`) |
-| `auto_gcp.py` | **Today's actual path** - georeferences a batch of screenshots automatically (DP alignment + bbox seeds, refined by ICP) |
+| `auto_gcp.py` | **Start here** - georeferences a batch of screenshots automatically (DP alignment + bbox seeds, refined by ICP); no subcommand |
+| `georeference_screenshot.py` | Manual fallback for years `auto_gcp.py` can't fit - georeferences one screenshot from human-identified GCPs; **subcommand-based** (`list-vertices` / `pick` / `fit`) |
 | `plot_overlay.py` | Plots a georeferenced photo with the live cadastral boundary overlaid; batch mode processes every already-fitted year in one go |
+| `generate_report.py` | Builds a Word report (A4, one overlay figure per fitted year) - see "Generating the Word report" below |
+
+## Generating the Word report (`generate_report.py`)
+
+    python3 generate_report.py --kommune Etnedal --gnr 123 --bnr 9
+    # -> <property>_Report.docx in the property's output folder
+
+Pages are set to real A4 (21.0 x 29.7 cm, 1.5 cm side / 2.0 cm top-bottom
+margins) rather than python-docx's US Letter default, and each figure is
+sized to the full usable page width/height (not a fixed inch guess) so
+every overlay image fills as much of the sheet as it can.
+
+Each figure's caption re-queries `imagery_search.py` live (not a cached
+value) for that year's real covering Norge i Bilder project, and reports
+its name, photo date, and native (source-photo) resolution alongside the
+fit's own RMSE/max-error/GCP-count - e.g.:
+
+> Figure 2. 123/9, 1970 - source: 'Etnedal-Nordre Land 1970' (aerial,
+> photo date 1970-08-13, 0.2 m/px native resolution). Georeferenced via
+> Automatic (auto_gcp.py) (17 GCPs, RMSE = 2.22 m, max error = 4.37 m).
+
+If a screenshot's year label doesn't exactly match any covering
+project's own year field, the caption falls back to the nearest
+covering project within 2 years and says so explicitly rather than
+reporting nothing - a real safety net for a real mistake: 123/9
+Etnedal's 1958 screenshot was originally mislabelled 1956 (a manual
+capture typo, since fixed by renaming the file/manifest entry), and
+before that fix the caption correctly caught the mismatch instead of
+silently reporting nothing:
+
+> Figure 1. 123/9, 1956 - source: 'Nordre Etnedal - Aurdal 1958' (aerial,
+> photo date 1958-06-05, 0.2 m/px native resolution) [nearest covering
+> project, dated 1958 - screenshot labelled 1956]. ...
 
 ## Running `download_images.py`
 

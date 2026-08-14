@@ -24,11 +24,12 @@ import json
 import os
 
 from docx import Document
-from docx.shared import Inches, Pt, RGBColor
+from docx.shared import Cm, Inches, Pt, RGBColor
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.enum.table import WD_TABLE_ALIGNMENT
 
 from property import fetch_property, property_code
+from imagery_search import find_covering_projects, best_covering_project
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -36,6 +37,33 @@ METHOD_LABELS = {
     "automatic_gcp_extraction": "Automatic (auto_gcp.py)",
     "manual_gcp_affine_fit": "Manual (georeference_screenshot.py)",
 }
+
+# A4, with tight-ish margins - the figures in Section 4 use the full
+# resulting page width (see set_a4_page_and_get_usable_width), rather
+# than a fixed inch value that leaves most of the sheet unused.
+A4_WIDTH_CM = 21.0
+A4_HEIGHT_CM = 29.7
+MARGIN_LR_CM = 1.5
+MARGIN_TB_CM = 2.0
+# Rough vertical budget for each figure's "4.N <year>" heading + caption
+# + inter-paragraph spacing, so a full-width (and, since every overlay
+# PNG this project produces is square, equally tall) image still fits
+# on one page rather than spilling a sliver onto the next.
+FIGURE_TEXT_BUDGET_CM = 3.0
+
+
+def set_a4_page_and_get_usable_width(doc):
+    section = doc.sections[0]
+    section.page_width = Cm(A4_WIDTH_CM)
+    section.page_height = Cm(A4_HEIGHT_CM)
+    section.left_margin = Cm(MARGIN_LR_CM)
+    section.right_margin = Cm(MARGIN_LR_CM)
+    section.top_margin = Cm(MARGIN_TB_CM)
+    section.bottom_margin = Cm(MARGIN_TB_CM)
+    usable_width = section.page_width - section.left_margin - section.right_margin
+    usable_height = (section.page_height - section.top_margin - section.bottom_margin
+                      - Cm(FIGURE_TEXT_BUDGET_CM))
+    return min(usable_width, usable_height)
 
 
 def add_equation_block(doc, lines):
@@ -102,7 +130,12 @@ def main():
     manifest = load_manifest(outdir, basename)
     images = sorted(manifest["images"], key=lambda r: r["year"])
 
+    print("Searching Norge i Bilder's project coverage for this property "
+          "(for each figure's source-project caption)...")
+    imagery_projects = find_covering_projects(prop.polygon)
+
     doc = Document()
+    usable_width = set_a4_page_and_get_usable_width(doc)
 
     # --- Title page ---
     title = doc.add_heading(
@@ -327,14 +360,55 @@ def main():
         img_name = os.path.splitext(r["filename"])[0] + "_overlay.png"
         img_path = os.path.join(outdir, img_name)
         method_label = METHOD_LABELS.get(r["georeferencing_method"], r["georeferencing_method"])
+
+        # Key output from imagery_search.py: which real Norge i Bilder
+        # project this year's photo actually came from, and its native
+        # (source-photo) resolution - distinct from r["pixel_size_m"]
+        # above, which is this *screenshot's* rasterized resolution at
+        # whatever zoom level it was captured at, not the underlying
+        # photo's own resolution.
+        source = best_covering_project(imagery_projects, year, allow_satellite=True)
+        matched_year = year
+        if source is None:
+            # The screenshot's year label (chosen by whoever captured it,
+            # e.g. from the norgeibilder.no timeline UI) occasionally
+            # doesn't exactly match the covering project's own "aar"
+            # field - seen for real with 123/9 Etnedal: a screenshot
+            # labelled 1956 whose only covering project is dated 1958
+            # (photo date 1958-06-05). Rather than silently reporting
+            # nothing, fall back to the nearest covering year within a
+            # couple of years and say so explicitly in the caption -
+            # never claim an exact match that isn't real.
+            NEAR_YEAR_TOLERANCE = 2
+            near_years = sorted(
+                {p.year for p in imagery_projects
+                 if abs(p.year - year) <= NEAR_YEAR_TOLERANCE},
+                key=lambda y: abs(y - year))
+            for cand_year in near_years:
+                source = best_covering_project(imagery_projects, cand_year, allow_satellite=True)
+                if source is not None:
+                    matched_year = cand_year
+                    break
+        if source is not None:
+            kind = "satellite" if source.is_satellite else ("CIR" if source.is_cir else "aerial")
+            if matched_year != year:
+                year_note = " [nearest covering project, dated {} - screenshot labelled {}]".format(
+                    matched_year, year)
+            else:
+                year_note = ""
+            source_desc = "source: {!r} ({}, photo date {}, {:g} m/px native resolution){}".format(
+                source.name, kind, source.photo_date, source.pixel_size_m, year_note)
+        else:
+            source_desc = "source project not found in a live imagery_search.py re-check"
+
         if os.path.isfile(img_path):
             doc.add_heading(f"4.{i}  {year}", level=2)
-            doc.add_picture(img_path, width=Inches(5.8))
+            doc.add_picture(img_path, width=usable_width)
             add_caption(
                 doc,
-                "Figure {}. {}, {} - georeferenced via {} ({} GCPs, RMSE = {:.2f} m, "
+                "Figure {}. {}, {} - {}. Georeferenced via {} ({} GCPs, RMSE = {:.2f} m, "
                 "max error = {:.2f} m).".format(
-                    i, prop.matrikkelnummer, year, method_label, r["n_gcp"],
+                    i, prop.matrikkelnummer, year, source_desc, method_label, r["n_gcp"],
                     r["rmse_m"], r["max_error_m"]))
         else:
             doc.add_heading(f"4.{i}  {year}", level=2)
