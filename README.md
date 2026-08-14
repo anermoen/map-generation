@@ -136,6 +136,26 @@ Replace `Etnedal 123 9` with your own kommune/gnr/bnr throughout.
    static files - see "Viewing in a browser" below for why that's a
    separate step and not just part of step 7.
 
+**Once screenshots are captured (step 3), `run_all.py` chains steps 1,
+2, and 4-8 into one command** - each one invoked exactly as its own
+documented CLI above (a real subprocess call, not reimplemented logic),
+stopping immediately if any step fails:
+
+    python3 run_all.py --kommune Etnedal --gnr 124 --bnr 9
+    python3 run_all.py --kommune Etnedal --gnr 124 --bnr 9 --push   # also commit + push docs/ to GitHub
+
+Checks for raw screenshots up front and stops with clear guidance if
+none are found, rather than run six more steps against nothing - the
+one thing it still can't do for you is step 3 itself. `--push` is
+opt-in, not automatic: a property's data going live on a public URL is
+a real, visible action worth a deliberate flag, not a script's default
+behavior. Verified for real on a third property, 124/9 Etnedal
+("Langvassetera"): 6 of its 8 screenshots fit automatically (the other
+2 correctly reported as needing `georeference_screenshot.py`'s manual
+fallback, not silently skipped or treated as a pipeline failure),
+report/tiles generated for those 6, and pushed straight to the live
+site.
+
 ## `property.py`: cadastral boundary lookup
 
 Fetches a property's exact polygon boundary from Kartverket's open WFS
@@ -593,6 +613,7 @@ confidently fit, `georeference_screenshot.py`'s manual `list-vertices`/
 | `generate_report.py` | Builds a Word report (A4, one overlay figure per fitted year) - see "Generating the Word report" below |
 | `generate_mbtiles.py` | Packages each fitted year into an offline map-tile file for the Android app - see "Viewing on Android" below |
 | `export_web_tiles.py` | Unpacks that same MBTiles output into plain static tiles for the browser viewer - see "Viewing in a browser" below |
+| `run_all.py` | Chains steps 1, 2, 4-8 of the full workflow below into one command, once screenshots are captured |
 
 ## Generating the Word report (`generate_report.py`)
 
