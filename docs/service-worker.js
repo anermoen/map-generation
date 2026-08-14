@@ -66,6 +66,23 @@ self.addEventListener("activate", (event) => {
 });
 
 self.addEventListener("fetch", (event) => {
+    if (event.request.mode === "navigate") {
+        // The URL can carry a ?property=<code> query string (app.js
+        // sets it via history.replaceState once a property loads) that
+        // changes which property the already-loaded shell shows
+        // client-side, not which file gets served - only the bare
+        // shell URL was actually precached, so match ignoring the
+        // query string here. Verified this was a real, live bug: the
+        // default property (alphabetically first) sets that query
+        // string on the very first load, so an offline reload
+        // immediately after missed the cache entirely (exact URL match
+        // includes the query string by default) and failed instead of
+        // serving the cached shell.
+        event.respondWith(
+            caches.match(event.request, { ignoreSearch: true }).then((cached) => cached || fetch(event.request))
+        );
+        return;
+    }
     event.respondWith(
         caches.match(event.request).then((cached) => cached || fetch(event.request))
     );
