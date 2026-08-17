@@ -7,7 +7,26 @@
 // being hardcoded here, so nothing goes stale as properties/years are
 // added.
 
-const CACHE_NAME = "aerial-viewer-v2";
+const CACHE_NAME = "aerial-viewer-v3";
+
+// URLs that can change between visits - a new property, a new year, an
+// app update - and so must never be served from cache while there's a
+// network connection available, only as an offline fallback. Confirmed
+// this was a real, live bug, not just a theoretical one: adding a
+// third property (124/9 Etnedal) after the service worker had already
+// cached tiles/properties.json on an earlier visit left it invisible
+// to that browser indefinitely - the old cache-first-forever strategy
+// had no way to notice the registry had changed, and nothing forces a
+// visitor to revisit with a network connection *and* happen to get a
+// byte-different service-worker.js at the same time. Tile images
+// aren't in this list on purpose: a given year's tile at a given
+// z/x/y is genuinely immutable once generated, so those stay
+// cache-first for efficiency - no reason to re-fetch hundreds of
+// unchanged tiles on every visit.
+function isVolatile(url) {
+    return url.endsWith("/properties.json") || url.endsWith("/manifest.json") ||
+        url.endsWith("/app.js") || url.endsWith("/style.css");
+}
 
 const SHELL_URLS = [
     "./",
@@ -65,22 +84,40 @@ self.addEventListener("activate", (event) => {
     );
 });
 
+// Network-first: try live network, cache the fresh response as it goes
+// by (so the offline fallback stays reasonably current too), and only
+// fall back to whatever's already cached if the network fetch fails.
+// matchOptions is passed through to both the fallback match and the
+// cache key, so a caller can e.g. ignore the search string.
+async function networkFirst(request, matchOptions) {
+    try {
+        const response = await fetch(request);
+        const cache = await caches.open(CACHE_NAME);
+        cache.put(matchOptions ? request.url.split("?")[0] : request, response.clone());
+        return response;
+    } catch (err) {
+        const cached = await caches.match(request, matchOptions);
+        if (cached) return cached;
+        throw err;
+    }
+}
+
 self.addEventListener("fetch", (event) => {
     if (event.request.mode === "navigate") {
         // The URL can carry a ?property=<code> query string (app.js
         // sets it via history.replaceState once a property loads) that
         // changes which property the already-loaded shell shows
-        // client-side, not which file gets served - only the bare
-        // shell URL was actually precached, so match ignoring the
-        // query string here. Verified this was a real, live bug: the
-        // default property (alphabetically first) sets that query
-        // string on the very first load, so an offline reload
-        // immediately after missed the cache entirely (exact URL match
-        // includes the query string by default) and failed instead of
-        // serving the cached shell.
-        event.respondWith(
-            caches.match(event.request, { ignoreSearch: true }).then((cached) => cached || fetch(event.request))
-        );
+        // client-side, not which file gets served - matched ignoring
+        // it both ways here. Verified this was a real, live bug on its
+        // own: the default property (alphabetically first) sets that
+        // query string on the very first load, so an offline reload
+        // immediately after missed an exact-match cache lookup and
+        // failed instead of serving the cached shell.
+        event.respondWith(networkFirst(event.request, { ignoreSearch: true }));
+        return;
+    }
+    if (isVolatile(event.request.url)) {
+        event.respondWith(networkFirst(event.request));
         return;
     }
     event.respondWith(
