@@ -548,6 +548,59 @@ fits "succeeded" by every check above and were still visibly wrong:
    having the tiering decision call `verify_registration()` itself,
    the same check that will decide pass/fail anyway, instead of a
    separate threshold that could silently drift out of sync with it.
+6. **Rotation itself was still a free parameter by default - one step
+   short of the true model.** Fix 5 removed shear/anisotropic-scale as
+   an unphysical escape hatch, but `fit_similarity()`'s remaining
+   rotation degree of freedom is *also* unphysical here:
+   norgeibilder.no's viewer has no rotation control at all (already
+   established above, as the basis for `_is_plausible_rotation()`'s
+   20-degree gate), so a real capture is always exactly north-up - any
+   nonzero rotation a fit finds is, by definition, absorbing GCP
+   correspondence noise into a plausible-looking but wrong small
+   rotation, not a genuine feature of the screenshot. Confirmed
+   directly and visibly, not just numerically: 124/9 Etnedal's 2006,
+   2011, 2016, and 1986 screenshots fit at -15.8, -6.6, 11.4, and -18.6
+   degrees respectively - each individually under the 20-degree gate,
+   so none were rejected, but each visibly wrong against the live
+   boundary once actually looked at (the whole reason a passing RMSE
+   alone was never treated as sufficient evidence elsewhere in this
+   file). `fit_translation_scale()` (`georeference_screenshot.py`) adds
+   the true, further-constrained 3-unknown model (uniform scale +
+   translation, rotation fixed at exactly zero); `auto_gcp.py` now
+   tries every seed/epsilon/dedupe/color combination at zero rotation
+   *first*, and only allows `fit_similarity()`'s rotation as a fallback
+   if nothing at zero rotation verifies - rotation is a last resort
+   tried once across the whole search, not a default degree of freedom
+   spent on every fit.
+
+   Getting the *ordering* of that fallback right took two more real
+   bugs found while verifying this fix, not just the constraint itself:
+   (a) rotation was originally decided *within* one color candidate's
+   search before moving to the next color - so on 124/9 Etnedal's 2011
+   screenshot, the confirmed (but that year, drifted-wrong) color's own
+   zero-rotation search correctly found nothing, but letting *that one
+   wrong color* fall back to rotation found a self-consistent,
+   verify_registration-passing-but-wrong fit (RMSE 2.3m, -6.6 degrees)
+   before the search ever reached the drift-fallback color that fits
+   this year well at zero rotation - fixed by making rotation the
+   outermost tier, tried across *every* color candidate at zero
+   rotation before any color is allowed to use rotation at all. (b)
+   Within one color/rotation combination, the epsilon/seed/dedupe grid
+   was picking whichever candidate had the lowest raw RMSE, not
+   whichever actually passed `verify_registration()` - a few points can
+   fit deceptively tightly by chance (near-collinear or otherwise
+   unrepresentative) and score a lower RMSE than a well-supported,
+   genuinely-correct candidate sitting right next to it in the same
+   grid, while failing verification for an unrelated reason (e.g.
+   projecting mostly outside the image) - silently hiding the good
+   candidate from ever being returned. Fixed by preferring a verified
+   candidate over a merely lower-RMSE one at that finest grain too, the
+   same "prefer ok, then lowest RMSE" pattern now applied consistently
+   at every tier of the search (epsilon/seed/dedupe, color, and
+   rotation alike). Regression-tested after both fixes: all four
+   properties' 43 screenshots still fit fully automatically, and every
+   single one now measures *exactly* zero rotation, with no case
+   needing the fallback at all once the search was correct.
 
 **Verified on all four properties' full real screenshot sets**: every
 single screenshot across 123/9 Etnedal (8), 14/987 Nittedal (14), 124/9

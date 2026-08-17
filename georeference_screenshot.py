@@ -279,6 +279,53 @@ def fit_similarity(gcps_world, gcps_pixel):
     return transform, float(np.sqrt(np.mean(errors ** 2))), float(errors.max()), errors
 
 
+def fit_translation_scale(gcps_world, gcps_pixel):
+    """Same signature/return shape as fit_similarity(), but constrained
+    one step further: uniform scale + translation only, rotation fixed
+    at exactly zero (3 real degrees of freedom, not 4). This is the
+    *true* north-up model for these screenshots, not an approximation -
+    norgeibilder.no's viewer has no rotation control at all, so a real
+    capture is always exactly north-up; any nonzero rotation
+    fit_similarity() finds is, by definition, either compensating for
+    GCP correspondence noise or an outright wrong correspondence, never
+    a genuine feature of the screenshot. auto_gcp.py tries this
+    constrained fit across its whole seed/epsilon search first, and
+    only allows fit_similarity()'s extra rotation degree of freedom as
+    a fallback if nothing here verifies - confirmed directly that
+    leaving rotation free as the *default* let it silently absorb
+    correspondence errors into a plausible-looking but wrong small
+    rotation on multiple real screenshots (124/9 Etnedal's 2006/2011/
+    2016/1986, fitted at -15.8/-6.6/11.4/-18.6 degrees respectively,
+    all visibly wrong against the live boundary despite passing every
+    other check) - rotation is a last resort, not a first-class degree
+    of freedom to spend on every fit by default.
+
+    The 3 unknowns (s, c, f) are solved by ordinary linear least
+    squares: easting = s*col + c, northing = -s*row + f (same
+    row-increases-downward sign convention as fit_similarity())."""
+    n = len(gcps_world)
+    if n < 2:
+        raise ValueError(f"Need at least 2 GCPs to fit a 2D translation+scale transform, got {n}")
+
+    A = np.zeros((2 * n, 3))
+    b = np.zeros(2 * n)
+    for i, ((px, py), (ex, nx)) in enumerate(zip(gcps_pixel, gcps_world)):
+        A[2 * i] = [px, 1, 0]
+        A[2 * i + 1] = [-py, 0, 1]
+        b[2 * i] = ex
+        b[2 * i + 1] = nx
+
+    params, _, _, _ = np.linalg.lstsq(A, b, rcond=None)
+    s_, c_, f_ = params
+    a_, b_, d_, e_ = s_, 0.0, 0.0, -s_
+    transform = Affine(a_, b_, c_, d_, e_, f_)
+
+    predicted = np.array([[a_ * px + b_ * py + c_, d_ * px + e_ * py + f_]
+                           for px, py in gcps_pixel])
+    errors = np.linalg.norm(predicted - np.array(gcps_world), axis=1)
+    return transform, float(np.sqrt(np.mean(errors ** 2))), float(errors.max()), errors
+
+
 def _merge_into_manifest(manifest_path, prop, record, basename):
     if os.path.isfile(manifest_path):
         with open(manifest_path) as f:

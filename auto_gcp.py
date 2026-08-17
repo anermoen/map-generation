@@ -139,8 +139,8 @@ from scipy.spatial import cKDTree
 from PIL import Image
 
 from property import fetch_property
-from georeference_screenshot import simplified_vertices, fit_similarity, write_boundary_geojson, \
-    _merge_into_manifest
+from georeference_screenshot import simplified_vertices, fit_similarity, fit_translation_scale, \
+    write_boundary_geojson, _merge_into_manifest
 from plot_overlay import find_input_screenshots
 
 MIN_CONTOUR_DIM = 80            # ignore tiny contours (noise, unrelated UI elements)
@@ -616,7 +616,7 @@ def _candidate_alignments(pixel_angles, world_angles, skip_cost, top_k):
 def _icp_refine(seed_transform, pixel_pts, ring_tree, ring_coords,
                  max_iterations=ICP_MAX_ITERATIONS, initial_gate_m=ICP_INITIAL_GATE_M,
                  min_gate_m=ICP_MIN_GATE_M, shrink=ICP_SHRINK, min_points=ICP_MIN_POINTS,
-                 dedupe_targets=False):
+                 dedupe_targets=False, allow_rotation=True):
     """Iterative Closest Point: repeatedly project pixel_pts through the
     current transform, snap each to its nearest point on the property's
     actual (unsimplified) boundary ring, refit from the kept
@@ -644,7 +644,15 @@ def _icp_refine(seed_transform, pixel_pts, ring_tree, ring_coords,
     can tip a fit that would otherwise pass under the point-count floor
     - auto_extract_gcps tries both and lets its usual
     lowest-RMSE-that-passes-the-sanity-checks selection decide, the same
-    candidate-generation pattern used for DP-alignment seeds."""
+    candidate-generation pattern used for DP-alignment seeds.
+
+    allow_rotation: which of georeference_screenshot.py's two fit
+    functions refits each iteration - fit_similarity() (rotation
+    allowed) if True, fit_translation_scale() (rotation fixed at zero -
+    the true model; see its own docstring for why) if False. Every
+    iteration uses the same one, so an allow_rotation=False run never
+    drifts into a rotated result at all, not just discourages it."""
+    fit_fn = fit_similarity if allow_rotation else fit_translation_scale
     current = seed_transform
     gate = initial_gate_m
     pixel_arr = np.array(pixel_pts, dtype=float)
@@ -671,7 +679,7 @@ def _icp_refine(seed_transform, pixel_pts, ring_tree, ring_coords,
             kept = np.nonzero(keep)[0]
         mw = [tuple(ring_coords[idxs[i]]) for i in kept]
         mp = [tuple(pixel_arr[i]) for i in kept]
-        current, rmse, max_err, errors = fit_similarity(mw, mp)
+        current, rmse, max_err, errors = fit_fn(mw, mp)
         result = (current, rmse, max_err, mw, mp, errors)
         gate = max(min_gate_m, gate * shrink)
     return result
@@ -766,10 +774,16 @@ def _is_plausible_rotation(transform, max_deg=MAX_ROTATION_DEG):
     return abs(angle) <= max_deg
 
 
-def _generate_seeds(pixel_pts, pixel_closed, world_polygon, top_k_dp_seeds):
+def _generate_seeds(pixel_pts, pixel_closed, world_polygon, top_k_dp_seeds, allow_rotation=True):
     """Both independent seed strategies (see module docstring point 4) -
-    a list of candidate transforms, none individually trusted."""
+    a list of candidate transforms, none individually trusted.
+
+    allow_rotation: passed through to which fit function builds the
+    DP-alignment seeds (see _icp_refine's own allow_rotation for why) -
+    _bbox_seed is unaffected either way, since it's already rotation-
+    free and ICP immediately refits it with the right one regardless."""
     seeds = []
+    fit_fn = fit_similarity if allow_rotation else fit_translation_scale
 
     bbox_seed = _bbox_seed(pixel_pts, world_polygon)
     if bbox_seed is not None:
@@ -790,7 +804,7 @@ def _generate_seeds(pixel_pts, pixel_closed, world_polygon, top_k_dp_seeds):
                 if len(gw) < 3:
                     continue
                 try:
-                    seed_transform, _, _, _ = fit_similarity(gw, gp)
+                    seed_transform, _, _, _ = fit_fn(gw, gp)
                 except np.linalg.LinAlgError:
                     continue
                 seeds.append(seed_transform)
@@ -844,10 +858,21 @@ def auto_extract_gcps(screenshot_path, world_polygon,
 
     label_seed = detect_label_seed_point(img)
 
-    def best_fit_for_contour(contour, h_lo, h_hi):
+    def best_fit_for_contour(contour, h_lo, h_hi, allow_rotation):
         """Search every epsilon/seed/dedupe combination for one already-
-        extracted contour, returning (best_local_or_None, attempts)."""
+        extracted contour at one rotation-freedom level, returning
+        (best_local_or_None, attempts). Prefers a candidate that
+        actually passes verify_registration over one with merely lower
+        raw RMSE - a few points can fit deceptively tightly by chance
+        (near-collinear or otherwise unrepresentative), scoring a lower
+        RMSE than a well-supported, genuinely-correct candidate right
+        next to it in the same search grid while failing verification
+        for an unrelated reason (e.g. projecting mostly outside the
+        image) - picking by raw RMSE alone at this fine a grain can
+        silently prefer the degenerate one and never surface the good
+        one to the caller at all."""
         local_best = None
+        local_best_ok = False
         local_attempts = 0
 
         for epsilon in pixel_epsilons:
@@ -855,11 +880,13 @@ def auto_extract_gcps(screenshot_path, world_polygon,
             if len(pixel_pts) < 6:
                 continue
 
-            for seed_transform in _generate_seeds(pixel_pts, pixel_closed, world_polygon, top_k_dp_seeds):
+            for seed_transform in _generate_seeds(pixel_pts, pixel_closed, world_polygon,
+                                                    top_k_dp_seeds, allow_rotation=allow_rotation):
                 for dedupe_targets in (False, True):
                     local_attempts += 1
                     icp_result = _icp_refine(seed_transform, pixel_pts, ring_tree, ring_coords,
-                                              dedupe_targets=dedupe_targets)
+                                              dedupe_targets=dedupe_targets,
+                                              allow_rotation=allow_rotation)
                     if icp_result is None:
                         continue
                     transform, rmse, max_err, gcps_world, gcps_pixel, errors = icp_result
@@ -868,17 +895,21 @@ def auto_extract_gcps(screenshot_path, world_polygon,
                     if not _is_plausible_rotation(transform):
                         continue
 
-                    if local_best is None or rmse < local_best[0]:
+                    ok, _, _ = verify_registration(transform, rmse, img.shape, world_polygon)
+                    if (local_best is None or (ok and not local_best_ok)
+                            or (ok == local_best_ok and rmse < local_best[0])):
                         diagnostics = {
                             "epsilon": epsilon, "n_pixel_corners": len(pixel_pts),
                             "pixel_closed": pixel_closed, "n_gcp": len(gcps_world),
                             "contour_bbox": cv2.boundingRect(contour),
                             "hue_range": (h_lo, h_hi), "dedupe_targets": dedupe_targets,
+                            "allow_rotation": allow_rotation,
                         }
                         local_best = (rmse, max_err, gcps_world, gcps_pixel, transform, diagnostics)
+                        local_best_ok = ok
         return local_best, local_attempts
 
-    def best_fit_for_color(h_lo, h_hi):
+    def best_fit_for_color(h_lo, h_hi, allow_rotation):
         """Try the target property's own isolated boundary loop first
         (see isolate_target_boundary_mask - excludes neighboring
         parcels' touching/shared-edge lines, which the raw whole-mask
@@ -894,7 +925,7 @@ def auto_extract_gcps(screenshot_path, world_polygon,
             if isolated is not None:
                 contour = largest_contour(isolated)
                 if contour is not None:
-                    local_best, local_attempts = best_fit_for_contour(contour, h_lo, h_hi)
+                    local_best, local_attempts = best_fit_for_contour(contour, h_lo, h_hi, allow_rotation)
                     attempts += local_attempts
                     if local_best is not None:
                         local_best[5]["label_seeded"] = True
@@ -903,57 +934,98 @@ def auto_extract_gcps(screenshot_path, world_polygon,
         contour = largest_contour(mask)
         if contour is None:
             return None, attempts, attempts > 0
-        local_best, local_attempts = best_fit_for_contour(contour, h_lo, h_hi)
+        local_best, local_attempts = best_fit_for_contour(contour, h_lo, h_hi, allow_rotation)
         attempts += local_attempts
         if local_best is not None:
             local_best[5]["label_seeded"] = False
         return local_best, attempts, True
 
+    def search_colors(allow_rotation):
+        """Search every color candidate at one rotation-freedom level,
+        returning (best_or_None, ok, attempts, tried_any_contour) - same
+        per-color tiering as before (confirmed color first, drift-
+        fallback colors only tried if the confirmed one doesn't verify),
+        just parameterized by which fit family every candidate uses -
+        see the outer allow_rotation loop below for why this whole
+        search is itself repeated once per rotation-freedom level,
+        rather than rotation being decided within one color alone."""
+        best = None
+        best_ok = False
+        attempts = 0
+        tried_any_contour = False
+        for h_lo, h_hi in color_candidates:
+            local_best, local_attempts, contour_found = best_fit_for_color(h_lo, h_hi, allow_rotation)
+            attempts += local_attempts
+            tried_any_contour = tried_any_contour or contour_found
+            if local_best is None:
+                continue
+
+            if boundary_color is None:
+                # free auto-detection: every candidate is equally
+                # untrusted, so search all of them and let the lowest
+                # RMSE that passes the sanity checks win, same as always.
+                if best is None or local_best[0] < best[0]:
+                    best = local_best
+                continue
+
+            # boundary_color given: color_candidates[0] is the confirmed,
+            # trusted color and the rest are only a drift-tolerance fallback
+            # for when it doesn't actually produce a trustworthy fit - not
+            # just "produces something", but something that would itself
+            # pass verify_registration's own bar (checked here directly,
+            # not a separate, looser threshold that could drift out of sync
+            # with it - the internal per-candidate filter above only checks
+            # rotation plausibility, not RMSE-vs-pixel-size). Verified this
+            # distinction matters for real: 126/64 Etnedal's confirmed color
+            # still found *some* candidate passing that looser filter for
+            # 2019/2023 (RMSE 9.66m/5.26m - clearly the wrong color for
+            # those specific years, a real drift case, see
+            # detect_boundary_colors' docstring), which used to stop the
+            # search right there, before ever trying the color that
+            # actually fit those years well. Once any color's result
+            # genuinely passes, stop - competing a fallback hue against an
+            # already-good confirmed-color fit purely on RMSE risks a
+            # razor-thin, wrong win instead (verified separately: 14/987
+            # Nittedal's 2017 screenshot had a stray hue candidate beat the
+            # correct green line by 0.01m RMSE while being visibly worse -
+            # 18.9 deg of implied rotation vs. 5.8).
+            ok, _, _ = verify_registration(local_best[4], local_best[0], img.shape, world_polygon)
+            if best is None or (ok and not best_ok) or (ok == best_ok and local_best[0] < best[0]):
+                best = local_best
+                best_ok = ok
+            if ok:
+                break
+
+        if boundary_color is None and best is not None:
+            best_ok, _, _ = verify_registration(best[4], best[0], img.shape, world_polygon)
+        return best, best_ok, attempts, tried_any_contour
+
+    # Rotation is a last resort, tried only across *every* color
+    # candidate at zero rotation first failing to verify - not decided
+    # within one color alone. Confirmed this distinction matters for
+    # real, not just in principle: on 124/9 Etnedal's 2011 screenshot,
+    # the confirmed (but for that year, hue-drifted-wrong) color's own
+    # zero-rotation search correctly found nothing, but letting *that
+    # one wrong color* fall back to rotation found a self-consistent,
+    # verify_registration-passing-but-wrong fit (RMSE 2.3m, rotation
+    # -6.6 degrees) before ever trying the drift-fallback color that
+    # fits this year well at zero rotation - rotation "explaining away"
+    # a wrong color, not just wrong-correspondence noise within a
+    # right one. Trying every color at zero rotation before letting any
+    # color use rotation closes that gap.
     best = None
     best_ok = False
     attempts = 0
     tried_any_contour = False
-    for h_lo, h_hi in color_candidates:
-        local_best, local_attempts, contour_found = best_fit_for_color(h_lo, h_hi)
-        attempts += local_attempts
-        tried_any_contour = tried_any_contour or contour_found
-        if local_best is None:
-            continue
-
-        if boundary_color is None:
-            # free auto-detection: every candidate is equally untrusted,
-            # so search all of them and let the lowest RMSE that passes
-            # the sanity checks win, same as always.
-            if best is None or local_best[0] < best[0]:
-                best = local_best
-            continue
-
-        # boundary_color given: color_candidates[0] is the confirmed,
-        # trusted color and the rest are only a drift-tolerance fallback
-        # for when it doesn't actually produce a trustworthy fit - not
-        # just "produces something", but something that would itself
-        # pass verify_registration's own bar (checked here directly,
-        # not a separate, looser threshold that could drift out of sync
-        # with it - the internal per-candidate filter above only checks
-        # rotation plausibility, not RMSE-vs-pixel-size). Verified this
-        # distinction matters for real: 126/64 Etnedal's confirmed color
-        # still found *some* candidate passing that looser filter for
-        # 2019/2023 (RMSE 9.66m/5.26m - clearly the wrong color for
-        # those specific years, a real drift case, see
-        # detect_boundary_colors' docstring), which used to stop the
-        # search right there, before ever trying the color that
-        # actually fit those years well. Once any color's result
-        # genuinely passes, stop - competing a fallback hue against an
-        # already-good confirmed-color fit purely on RMSE risks a
-        # razor-thin, wrong win instead (verified separately: 14/987
-        # Nittedal's 2017 screenshot had a stray hue candidate beat the
-        # correct green line by 0.01m RMSE while being visibly worse -
-        # 18.9 deg of implied rotation vs. 5.8).
-        ok, _, _ = verify_registration(local_best[4], local_best[0], img.shape, world_polygon)
-        if best is None or (ok and not best_ok) or (ok == best_ok and local_best[0] < best[0]):
-            best = local_best
-            best_ok = ok
-        if ok:
+    for allow_rotation in (False, True):
+        round_best, round_ok, round_attempts, round_contour = search_colors(allow_rotation)
+        attempts += round_attempts
+        tried_any_contour = tried_any_contour or round_contour
+        if round_best is not None and (best is None or (round_ok and not best_ok)
+                                        or (round_ok == best_ok and round_best[0] < best[0])):
+            best = round_best
+            best_ok = round_ok
+        if round_ok:
             break
 
     if not tried_any_contour:
