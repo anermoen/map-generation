@@ -88,7 +88,12 @@ Replace `Etnedal 123 9` with your own kommune/gnr/bnr throughout.
    why the proper WMS route isn't available). From norgeibilder.no,
    with the eiendomsgrenser (property boundary) layer switched on, save
    each into the property's output folder named
-   `<gnr>-<bnr>-<kommune>-<year>.png` (e.g. `123-9-Etnedal-1970.png`).
+   `<gnr>-<bnr>-<kommune>-<year>.png` (e.g. `123-9-Etnedal-1970.png`) -
+   the year must be *only* digits before the extension
+   (`find_input_screenshots()`'s naming pattern requires it); a capture
+   named e.g. `126-64-Etnedal-2011b.png` (trying a second angle for a
+   year that didn't work the first time, say) won't match and is
+   silently left out of every later step, not reported as an error.
 
 4. **Georeference the screenshots.**
 
@@ -476,6 +481,29 @@ fits "succeeded" by every check above and were still visibly wrong:
    found (e.g. text too faint in a low-resolution historical photo) or
    the isolated region doesn't produce a valid fit, rather than
    compete the two on raw RMSE.
+4. **The RMSE sanity check's absolute floor was far too loose.**
+   `verify_registration()` rejected a fit only if RMSE was large *both*
+   relative to pixel size (>3x) *and* in absolute terms (>15m) - the
+   "and" was meant to stop the relative check alone from over-rejecting
+   fine-resolution screenshots (Nittedal's ~0.08 m/px years genuinely
+   run RMSE 1-2m, which is 12-25x pixel size yet still an excellent
+   absolute fit) - but a 15m absolute floor is nowhere near what this
+   project's real data ever produces: every genuinely good fit, across
+   every property and pixel size tested, has stayed under 2.55m RMSE.
+   Confirmed as a real, live bug, not just a theoretical gap: 126/64
+   Etnedal's 2023 screenshot "succeeded" at RMSE=7.67m from just 4 GCPs
+   - 17x its pixel size, but under the 15m floor - and was visibly,
+   unambiguously wrong when checked against the live boundary, not a
+   borderline case. Fixed by rejecting past whichever is more
+   permissive of a flat 5m absolute cap (over 2x the worst known-good
+   case) or 3x pixel size (still scales up for a genuinely coarse
+   screenshot). Re-running the same screenshot after the fix didn't
+   just correctly reject the bad candidate - with it excluded, a
+   different, already-present candidate that the bad one had been
+   out-competing on raw RMSE became the new best fit (RMSE=0.67m,
+   visually pixel-perfect against the live boundary). Regression-tested
+   against every already-fitted year across all four properties tested
+   to date (43 screenshots) - no previously-good fit newly failed.
 
 **Verified on both properties' full real screenshot sets**: all 8 of
 123/9 Etnedal's (1958, 1970, 1986, 1991, 2006, 2011, 2016, 2025) and all
@@ -767,6 +795,25 @@ time the page loads with a connection, so every later visit - GPS and
 all - works with no network at all. `docs/manifest.webmanifest` lets
 the phone's browser "Add to Home Screen" too, so it opens and behaves
 like a regular app icon despite being a web page underneath.
+
+**A property that's live on the server can still be invisible to an
+already-visited browser** - a real bug, not a hypothetical one:
+`tiles/properties.json` and each property's `manifest.json` were
+originally cached the same cache-first-forever way as the (genuinely
+immutable) tile images. Fine at first visit, but nothing ever
+revalidated them afterward - a browser that had visited before 124/9
+Etnedal was added kept serving that stale, 2-property registry
+indefinitely, even though the live site had 3, and would have hit the
+same problem again on every future property/year with no warning.
+Fixed by giving `properties.json`, each property's `manifest.json`,
+`app.js`, and `style.css` a network-first strategy instead (live data
+when there's a connection, the cached copy only as an offline
+fallback) - tile images stay cache-first, since those genuinely never
+change once generated. Verified by reproducing the exact failure
+directly: seeded a stale registry into a real browser cache, confirmed
+the old code kept serving it, confirmed the fix self-heals to the live
+registry while online, and confirmed the offline fallback - the actual
+point of the service worker - still works correctly afterward.
 
 **Deploying it**: push this repo to GitHub (already done - see below),
 then a one-time setting on GitHub's own site (not a script - no `gh`

@@ -1,6 +1,7 @@
 __pycache__/
 *.pyc
 .DS_Store
+*.swp
 
 # Per-property output folders, named "<gnr>-<bnr>-<kommune>" (e.g.
 # 123-9-Etnedal) by property.py's property_code() - manually-captured

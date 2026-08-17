@@ -685,7 +685,22 @@ def verify_registration(transform, rmse, img_shape, world_polygon):
     reasons = []
     if pixel_size <= 0 or pixel_size > 50:
         reasons.append(f"implausible pixel size {pixel_size:.2f} m/px")
-    if rmse > 3 * pixel_size and rmse > 15:
+    # A pure ratio check (rmse > 3*pixel_size alone) over-rejects fine-
+    # resolution screenshots: Nittedal's ~0.08 m/px years genuinely run
+    # RMSE 1-2m (still an excellent absolute fit), which is 12-25x
+    # pixel size - so some absolute floor is needed too, permissive
+    # enough for that case. But requiring *both* conditions (the
+    # original "and rmse > 15") let a real bad fit through uncaught:
+    # 126/64 Etnedal's 2023 screenshot fit "succeeded" at RMSE=7.67m
+    # (pixel_size ~0.148 m/px) - 17x the pixel size, but under the old
+    # 15m floor - and was visibly, unambiguously wrong when checked
+    # against the live boundary (see plot_overlay.py output), not just
+    # a borderline case. Every genuinely good fit across this project's
+    # real data, at any pixel size, has stayed under 2.55m RMSE - so
+    # reject past whichever is more permissive of a flat 5m absolute
+    # cap (over 2x that worst known-good case) or 3x pixel size (scales
+    # up for a genuinely coarse screenshot, not just a fine one).
+    if rmse > max(5.0, 3 * pixel_size):
         reasons.append(f"RMSE {rmse:.1f}m is large relative to pixel size {pixel_size:.2f}m/px")
     if not _is_isotropic(transform):
         reasons.append("transform scale is not isotropic (likely a degenerate fit)")
