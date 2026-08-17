@@ -32,20 +32,24 @@ norgeibilder.no screenshot" below). **Start with `auto_gcp.py`** - it
 does this fully automatically, batching through every screenshot in a
 property's folder with no human clicking corners; `georeference_screenshot.py`
 is the manual fallback for whichever specific years it can't confidently
-fit on its own. **Working end to end, for real**: 41 of the 43
+fit on its own. **Working end to end, for real**: 42 of the 43
 manually-captured screenshots on hand across four real properties -
 123/9 Etnedal (8), 14/987 Nittedal (14), 124/9 Etnedal (8), and 126/64
-Etnedal (13) - are georeferenced fully automatically via `auto_gcp.py`,
-visually confirmed correct against the live boundary for every one (see
+Etnedal (13) - are georeferenced correctly, visually confirmed against
+the live boundary for every single one via `plot_overlay.py` (see
 `auto_gcp.py`'s documented failure modes/fixes below, especially fixes
 5, 7, and 8, for how that went from "most of them" to "nearly all of
-them"). The two exceptions - 123/9 Etnedal's 1991 and 124/9 Etnedal's
-2016 - are genuinely under-constrained screenshots (too few reliable,
-well-spread real corners visible in frame) that fix 8 correctly
-recognized as unreliable rather than silently accepting a wrong result;
-they're queued for the manual fallback (`georeference_screenshot.py`,
-see below) next. `plot_overlay.py`'s batch mode (see "Per-property
-output folder" below) regenerates every overlay in one command.
+them"). 39 of those 42 got there via `auto_gcp.py` alone; 3 (all in
+123/9 Etnedal - 1958, 1991, 2011) passed every one of `auto_gcp.py`'s
+automatic checks while still being wrong, caught only by actually
+looking at the overlay, and needed `georeference_screenshot.py`'s
+manual fallback instead - see the "Passing every check... still isn't
+proof" paragraph below fix 8 for why that distinction matters and won't
+be going away. The one remaining exception, 124/9 Etnedal's 2016, is a
+genuinely under-constrained screenshot (too few reliable, well-spread
+real corners visible in frame) that's queued for the manual fallback
+next. `plot_overlay.py`'s batch mode (see "Per-property output folder"
+below) regenerates every overlay in one command.
 
 ## Full workflow, step by step
 
@@ -692,21 +696,47 @@ fits "succeeded" by every check above and were still visibly wrong:
    left in with a silently wrong result) and queued for
    `georeference_screenshot.py`'s manual fallback below.
 
-**Verified on all four properties' full real screenshot sets**: 41 of
-43 screenshots across 123/9 Etnedal (8), 14/987 Nittedal (14), 124/9
-Etnedal (8), and 126/64 Etnedal (13) now fit fully automatically,
-visually confirmed correct via `plot_overlay.py`, not just numerically
-plausible - the remaining two (123/9 Etnedal's 1991, 124/9 Etnedal's
-2016) are queued for the manual fallback below (see fix 8's own
-paragraph just above for why). That 41 weren't always the number, and
-won't necessarily stay the number: `georeference_screenshot.py`'s
-manual fallback (below) put in genuine work fitting 124/9 Etnedal's
-1986/1991 and 126/64 Etnedal's 1986/1991/2001/2011 by hand at the time
-(see the manual-fallback section's own worked example) - fix 5 above is
-what later made even those fit automatically on a from-scratch re-run,
-and fixes 7-8 did the same for six more of 126/64's years and one of
-123/9's. Each fix closed a specific, evidenced gap; there's no
-guarantee the next new screenshot won't find another one.
+**Passing every check in fix 8 still isn't proof of a correct fit -
+confirmed again, immediately, on the very same property.** Two more of
+123/9 Etnedal's screenshots (1958, 2011) turned out wrong *after* fix 8
+shipped, each individually inside every tightened bound (pixel size
+0.905 and 0.715 m/px respectively - both plausible on their own, just
+not the ~1.32 m/px every other year of this same property converges to;
+RMSE and `frac_outside` both fine) - nothing in the automated pipeline
+flagged either one. Found the same way as fix 8's own 1991 case: by
+actually rendering the overlay and looking at it, not by a check.
+Fixed manually via `georeference_screenshot.py`, the same
+predict-and-verify approach as 1991 (see the manual-fallback section
+below) - both now fit at ~1.32 m/px like the rest of the property, and
+all three residuals independently confirmed reasonable (visually and
+against the other overlays' consistent 1970-2025 pixel size cluster).
+The lesson isn't a new threshold to add - it's that **"passed
+verify_registration" and "confirmed correct" are not the same claim**,
+and this file should stop conflating them: every count below reflects
+screenshots someone actually looked at via `plot_overlay.py`, not just
+ones `auto_gcp.py` accepted.
+
+**Verified on all four properties' full real screenshot sets, by
+looking at every overlay, not by trusting a passing check**: 39 of 43
+screenshots across 123/9 Etnedal (8), 14/987 Nittedal (14), 124/9
+Etnedal (8), and 126/64 Etnedal (13) fit correctly via `auto_gcp.py`
+alone; 3 more (123/9 Etnedal's 1958, 1991, and 2011) needed
+`georeference_screenshot.py`'s manual fallback after passing every
+automatic check while still being wrong (see above) - all 8 of 123/9
+Etnedal's screenshots are now confirmed correct, by one route or the
+other. The remaining one, 124/9 Etnedal's 2016, is still queued for the
+manual fallback below (see fix 8's own paragraph for why automatic
+fitting genuinely can't resolve it). This isn't the first time the
+"automatic" count has moved in both directions: `georeference_screenshot.py`'s
+manual fallback put in genuine work fitting 124/9 Etnedal's 1986/1991
+and 126/64 Etnedal's 1986/1991/2001/2011 by hand at one point (see the
+manual-fallback section's own worked example) - fix 5 above is what
+later made even those fit automatically on a from-scratch re-run, and
+fixes 7-8 did the same for six more of 126/64's years and one of
+123/9's - before 123/9's 1958 and 2011 moved back the other way. Each
+fix closed a specific, evidenced gap; there's no guarantee the next new
+screenshot, or the next close look at an already-"passing" one, won't
+find another.
 
 `auto_gcp.py` still fails loudly (an error, or reporting no confident
 match) rather than silently accepting a wrong registration on whichever
@@ -714,22 +744,30 @@ year, someday, defeats all of the above - `georeference_screenshot.py`'s
 manual workflow (below) remains the intended fallback for that case,
 and `manifest.json`'s `georeferencing_method` field always records
 which path (`automatic_gcp_extraction` vs. `manual_gcp_affine_fit`)
-produced each year's fit.
+produced each year's fit. But a clean `manifest.json` entry only means
+"a check passed" - treat `plot_overlay.py`'s image, not the RMSE
+number, as the real source of truth for whether a fit is actually
+right.
 
 ### Manual fallback (`georeference_screenshot.py`)
 
-Only needed for a year `auto_gcp.py` couldn't confidently fit on its
-own (above) - currently two: 123/9 Etnedal's 1991 and 124/9 Etnedal's
-2016 (see `auto_gcp.py`'s fix 8 above for why they're excluded rather
-than left in with a silently-wrong automatic result), not yet worked
-through this fallback as of this writing. A low-quality or
-unusually-cropped screenshot could land here for any property, not just
-these two. Also worth knowing: 124/9 Etnedal's 1986/1991 and 126/64
-Etnedal's 1986/1991/2001/2011 were real, genuine uses of this fallback
-at an earlier point in the project (before fix 5 made even those fit
-automatically on a later re-run) - real sessions, not hypotheticals,
-though the worked example just below (123/9, a generic illustration
-predating that work) isn't itself from either of them.
+Needed two different ways: (a) a year `auto_gcp.py` couldn't confidently
+fit at all - currently just 124/9 Etnedal's 2016, still queued as of
+this writing; and (b) a year `auto_gcp.py` *did* confidently fit, every
+automatic check passing, while still being wrong - 123/9 Etnedal's
+1958, 1991, and 2011, all three found only by looking at the overlay
+image, not by any check (see fix 8's "Passing every check... still
+isn't proof" paragraph above), and all three now fixed through this
+fallback. Real, worked sessions in both categories, not hypotheticals -
+see this section's own worked example just below for the method (predict
+a distant vertex's pixel position from one confident corner + the
+property's own known pixel scale, then verify against the actual
+screenshot before trusting it, rather than guessing corners blind).
+Also worth knowing: 124/9 Etnedal's 1986/1991 and 126/64 Etnedal's
+1986/1991/2001/2011 were earlier, genuine uses of this fallback too
+(before fix 5 made even those fit automatically on a later re-run) - a
+low-quality or unusually-cropped screenshot could land here for any
+property, not just the ones named above.
 Deliberately approximate, not a substitute for a real WMS download -
 accuracy is limited by screenshot resolution (whatever zoom level the
 browser was at, not the source photo's native resolution) and how
