@@ -136,6 +136,8 @@ import rasterio
 from rasterio.crs import CRS
 from rasterio.transform import Affine
 from scipy.spatial import cKDTree
+from shapely.geometry import LineString, Point as ShapelyPoint
+from shapely.ops import polygonize, unary_union
 from PIL import Image
 
 from property import fetch_property
@@ -478,6 +480,138 @@ def simplify_contour(contour, img_shape, epsilon):
     raw = [tuple(p) for p in approx.reshape(-1, 2)]
     pts = _split_there_and_back(raw) if clipped else _dedupe_consecutive(raw)
     return pts, not clipped
+
+
+# Graph/face-based isolation (extract_target_face_contour) - a second,
+# more robust alternative to isolate_target_boundary_mask's flood fill.
+# Real screenshots confirmed both failure modes flood-fill can't recover
+# from: (a) 126/64 Etnedal's 2016, where the target's own line runs close
+# enough to a neighboring parcel's that their anti-aliased strokes touch,
+# so the "inside" flood fill leaks straight through into ~80% of the
+# frame instead of stopping at the property's own edge; (b) 126/64
+# Etnedal's 2019/2025/2011/2006/2001/1986, where a *different*, unrelated
+# parcel's boundary (also drawn in the same confirmed hue) crosses right
+# through the frame, fusing into the same connected blob as the target's
+# own line without ever being adjacent/touching it in world space at all
+# - not a neighbor sharing an edge, just two lines that happen to cross
+# in this particular screenshot's framing. Both cases defeat "is this
+# pixel inside or outside" flood-fill reasoning, because the leak/fusion
+# point is a single pixel-wide junction, not a gap - but both are exactly
+# what a planar arrangement (the vivid-colored pixels form a graph of
+# straight edges meeting at corners/junctions - shared corners with real
+# neighbors, or incidental crossings with unrelated parcels, treated
+# identically) resolves cleanly: shapely.ops.polygonize turns a set of
+# line segments into their enclosed faces, and by construction never
+# includes an edge that doesn't participate in closing a ring - so a
+# dangling arm (this property's own line stops, or a neighbor's/unrelated
+# parcel's line continues past the shared point) simply never becomes
+# part of any face, without needing to be specially detected and pruned.
+# Picking the one face that contains the target's own gnr/bnr label point
+# (see detect_label_seed_point) is then the same disambiguation idea
+# isolate_target_boundary_mask already uses, just resolved via planar
+# topology instead of flood fill.
+FACE_GRAPH_EPSILON = 2.5        # px - contour simplification level used to build the line graph
+FACE_SNAP_TOL_PX = 28.0         # px - see _cluster_snap_points
+FACE_LABEL_MAX_DIST_PX = 40.0   # px - reject a "nearest face" fallback this far from the label
+
+
+def _cluster_snap_points(points, radius):
+    """Union-find clustering of points mutually within `radius` of each
+    other, each cluster collapsed to its members' centroid. Needed
+    because cv2.findContours traces the *outline* of a thin-stroke mask -
+    walking out along one side of the stroke and back along the other -
+    so a single real corner shows up as two (or more, at a junction)
+    slightly-offset points in the raw trace, a few px apart from
+    antialiasing/stroke width, not at the exact same pixel. Without
+    merging those into one shared coordinate, polygonize sees two
+    almost-but-not-quite-parallel edges instead of one, and the sliver
+    between them shows up as its own (wrong, tiny) face rather than the
+    two sides properly closing into the one true face - confirmed
+    directly: without this step, polygonize on a real screenshot's
+    contour trace produced dozens of ~50-450 sq px sliver faces and never
+    the true ~200,000 sq px property face at all. radius has to cover not
+    just this few-px stroke-width jitter but also the larger (~10-25px on
+    this project's real screenshots) gap between a sharp corner's two
+    trace visits, which is why it's tens of px, not units - see
+    FACE_SNAP_TOL_PX."""
+    n = len(points)
+    parent = list(range(n))
+
+    def find(a):
+        while parent[a] != a:
+            parent[a] = parent[parent[a]]
+            a = parent[a]
+        return a
+
+    def union(a, b):
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[ra] = rb
+
+    for i in range(n):
+        for j in range(i + 1, n):
+            if np.hypot(points[i][0] - points[j][0], points[i][1] - points[j][1]) <= radius:
+                union(i, j)
+
+    groups = {}
+    for i in range(n):
+        groups.setdefault(find(i), []).append(i)
+
+    snapped = {}
+    for members in groups.values():
+        cx = float(np.mean([points[i][0] for i in members]))
+        cy = float(np.mean([points[i][1] for i in members]))
+        for i in members:
+            snapped[i] = (cx, cy)
+    return snapped
+
+
+def extract_target_face_contour(mask, label_seed, epsilon=FACE_GRAPH_EPSILON,
+                                 snap_tol=FACE_SNAP_TOL_PX,
+                                 label_max_dist=FACE_LABEL_MAX_DIST_PX):
+    """Alternative to isolate_target_boundary_mask: treat the whole
+    boundary-color mask (every visible parcel's line, not just the
+    target's) as a planar graph and pick the one enclosed face
+    containing the target's own gnr/bnr label point, discarding every
+    other face and every dangling (non-ring-closing) edge automatically
+    - see the module-level comment above for why this succeeds on real
+    screenshots where flood-fill isolation leaks. Returns a contour in
+    the same format cv2.findContours would (Nx1x2 int32), ready to feed
+    into simplify_contour/best_fit_for_contour like any other contour, or
+    None if no plausible enclosing face is found."""
+    contour = largest_contour(mask)
+    if contour is None:
+        return None
+    pts, closed = simplify_contour(contour, mask.shape, epsilon)
+    if closed:
+        pts = pts + [pts[0]]
+    if len(pts) < 4:
+        return None
+
+    snapped = _cluster_snap_points(pts, snap_tol)
+    edges = []
+    for i in range(len(pts) - 1):
+        p, q = snapped[i], snapped[i + 1]
+        if p != q:
+            edges.append(LineString([p, q]))
+    if len(edges) < 3:
+        return None
+
+    faces = list(polygonize(unary_union(edges)))
+    if not faces:
+        return None
+
+    pt = ShapelyPoint(label_seed)
+    target = next((f for f in faces if f.contains(pt)), None)
+    if target is None:
+        target = min(faces, key=lambda f: f.exterior.distance(pt))
+        if target.exterior.distance(pt) > label_max_dist:
+            return None
+
+    coords = np.array(target.exterior.coords[:-1], dtype=np.int32)
+    if len(coords) < 3:
+        return None
+    return coords.reshape(-1, 1, 2)
 
 
 def _bbox_seed(pixel_pts, world_polygon):
@@ -909,52 +1043,64 @@ def auto_extract_gcps(screenshot_path, world_polygon,
                         local_best_ok = ok
         return local_best, local_attempts
 
-    def best_fit_for_color(h_lo, h_hi, allow_rotation):
-        """Try the target property's own isolated boundary loop first
-        (see isolate_target_boundary_mask - excludes neighboring
-        parcels' touching/shared-edge lines, which the raw whole-mask
-        contour doesn't distinguish from the target's own), falling
-        back to the raw whole-mask contour if isolation isn't available
-        or doesn't work out for this screenshot. Returns
-        (best_local_or_None, attempts, contour_found)."""
+    def best_fit_for_color(h_lo, h_hi, allow_rotation, isolation):
+        """Try exactly one isolation strategy for one color/rotation
+        combination, returning (best_local_or_None, attempts,
+        contour_found). isolation is one of:
+          "face"  - extract_target_face_contour: planar-graph face
+                    containing the gnr/bnr label, robust to both a
+                    touching neighbor and an unrelated crossing line
+                    (see its own docstring) - the most trustworthy tier.
+          "flood" - isolate_target_boundary_mask: flood fill from the
+                    label, kept as a fallback since it's cheaper and
+                    still correct on screenshots the face method can't
+                    build a usable graph from (e.g. too few contour
+                    points).
+          "whole" - the raw whole-mask contour, not isolated at all -
+                    last resort.
+        A single tier is tried here, not cascaded within one color/
+        color+rotation combination - see the outer isolation loop below
+        for why."""
         mask = extract_boundary_mask(img, h_lo, h_hi)
-        attempts = 0
 
-        if label_seed is not None:
+        contour = None
+        if isolation == "face":
+            if label_seed is None:
+                return None, 0, False
+            contour = extract_target_face_contour(mask, label_seed)
+        elif isolation == "flood":
+            if label_seed is None:
+                return None, 0, False
             isolated = isolate_target_boundary_mask(mask, label_seed)
             if isolated is not None:
                 contour = largest_contour(isolated)
-                if contour is not None:
-                    local_best, local_attempts = best_fit_for_contour(contour, h_lo, h_hi, allow_rotation)
-                    attempts += local_attempts
-                    if local_best is not None:
-                        local_best[5]["label_seeded"] = True
-                        return local_best, attempts, True
+        else:
+            contour = largest_contour(mask)
 
-        contour = largest_contour(mask)
         if contour is None:
-            return None, attempts, attempts > 0
+            return None, 0, False
         local_best, local_attempts = best_fit_for_contour(contour, h_lo, h_hi, allow_rotation)
-        attempts += local_attempts
         if local_best is not None:
-            local_best[5]["label_seeded"] = False
-        return local_best, attempts, True
+            local_best[5]["label_seeded"] = isolation
+        return local_best, local_attempts, True
 
-    def search_colors(allow_rotation):
-        """Search every color candidate at one rotation-freedom level,
-        returning (best_or_None, ok, attempts, tried_any_contour) - same
-        per-color tiering as before (confirmed color first, drift-
-        fallback colors only tried if the confirmed one doesn't verify),
-        just parameterized by which fit family every candidate uses -
-        see the outer allow_rotation loop below for why this whole
-        search is itself repeated once per rotation-freedom level,
-        rather than rotation being decided within one color alone."""
+    def search_colors(allow_rotation, isolation):
+        """Search every color candidate at one (isolation, rotation-
+        freedom) combination, returning (best_or_None, ok, attempts,
+        tried_any_contour) - same per-color tiering as before (confirmed
+        color first, drift-fallback colors only tried if the confirmed
+        one doesn't verify), just parameterized by which fit family
+        every candidate uses - see the outer isolation/allow_rotation
+        loops below for why this whole search is itself repeated once
+        per (isolation, rotation-freedom) combination, rather than either
+        being decided within one color alone."""
         best = None
         best_ok = False
         attempts = 0
         tried_any_contour = False
         for h_lo, h_hi in color_candidates:
-            local_best, local_attempts, contour_found = best_fit_for_color(h_lo, h_hi, allow_rotation)
+            local_best, local_attempts, contour_found = best_fit_for_color(
+                h_lo, h_hi, allow_rotation, isolation)
             attempts += local_attempts
             tried_any_contour = tried_any_contour or contour_found
             if local_best is None:
@@ -1000,32 +1146,59 @@ def auto_extract_gcps(screenshot_path, world_polygon,
             best_ok, _, _ = verify_registration(best[4], best[0], img.shape, world_polygon)
         return best, best_ok, attempts, tried_any_contour
 
-    # Rotation is a last resort, tried only across *every* color
-    # candidate at zero rotation first failing to verify - not decided
-    # within one color alone. Confirmed this distinction matters for
-    # real, not just in principle: on 124/9 Etnedal's 2011 screenshot,
-    # the confirmed (but for that year, hue-drifted-wrong) color's own
-    # zero-rotation search correctly found nothing, but letting *that
-    # one wrong color* fall back to rotation found a self-consistent,
-    # verify_registration-passing-but-wrong fit (RMSE 2.3m, rotation
-    # -6.6 degrees) before ever trying the drift-fallback color that
-    # fits this year well at zero rotation - rotation "explaining away"
-    # a wrong color, not just wrong-correspondence noise within a
-    # right one. Trying every color at zero rotation before letting any
-    # color use rotation closes that gap.
+    # Isolation quality is the outermost tier, above rotation and color:
+    # every color is tried at the most-trustworthy isolation strategy
+    # ("face") before any color is allowed to fall back to a cruder one
+    # ("flood", then "whole") - not decided within one color alone, for
+    # the same reason rotation is handled as its own outer tier just
+    # below. Confirmed this distinction matters for real, not just in
+    # principle: 126/64 Etnedal's confirmed color's *unisolated*
+    # whole-mask contour (which includes every neighboring/crossing
+    # parcel's line fused into one blob - see extract_target_face_contour's
+    # docstring) can converge to a self-consistent, verify_registration-
+    # passing-but-wrong fit (a plausible-looking but wrong scale/position,
+    # not just rotation) on six of this property's thirteen real
+    # screenshots - before the *same* color's face-isolated contour,
+    # which fits correctly, is ever tried, if isolation were decided
+    # within one color instead of across all of them first.
+    #
+    # Rotation is nested one level in, still a last resort within each
+    # isolation tier, tried only across *every* color candidate at zero
+    # rotation first failing to verify - not decided within one color
+    # alone. Confirmed this distinction matters for real, not just in
+    # principle: on 124/9 Etnedal's 2011 screenshot, the confirmed (but
+    # for that year, hue-drifted-wrong) color's own zero-rotation search
+    # correctly found nothing, but letting *that one wrong color* fall
+    # back to rotation found a self-consistent, verify_registration-
+    # passing-but-wrong fit (RMSE 2.3m, rotation -6.6 degrees) before
+    # ever trying the drift-fallback color that fits this year well at
+    # zero rotation - rotation "explaining away" a wrong color, not just
+    # wrong-correspondence noise within a right one. Trying every color
+    # at zero rotation before letting any color use rotation closes that
+    # gap.
     best = None
     best_ok = False
     attempts = 0
     tried_any_contour = False
-    for allow_rotation in (False, True):
-        round_best, round_ok, round_attempts, round_contour = search_colors(allow_rotation)
-        attempts += round_attempts
-        tried_any_contour = tried_any_contour or round_contour
-        if round_best is not None and (best is None or (round_ok and not best_ok)
-                                        or (round_ok == best_ok and round_best[0] < best[0])):
-            best = round_best
-            best_ok = round_ok
-        if round_ok:
+    for isolation in ("face", "flood", "whole"):
+        isolation_best = None
+        isolation_ok = False
+        for allow_rotation in (False, True):
+            round_best, round_ok, round_attempts, round_contour = search_colors(
+                allow_rotation, isolation)
+            attempts += round_attempts
+            tried_any_contour = tried_any_contour or round_contour
+            if round_best is not None and (isolation_best is None or (round_ok and not isolation_ok)
+                                            or (round_ok == isolation_ok and round_best[0] < isolation_best[0])):
+                isolation_best = round_best
+                isolation_ok = round_ok
+            if round_ok:
+                break
+        if isolation_best is not None and (best is None or (isolation_ok and not best_ok)
+                                            or (isolation_ok == best_ok and isolation_best[0] < best[0])):
+            best = isolation_best
+            best_ok = isolation_ok
+        if isolation_ok:
             break
 
     if not tried_any_contour:
@@ -1049,7 +1222,8 @@ def fit_year(prop, outdir, basename, screenshot_path, year, boundary_color=None)
     img = np.array(Image.open(screenshot_path).convert("RGB"))
     ok, reasons, pixel_size = verify_registration(transform, rmse, img.shape, prop.polygon)
 
-    seeded = "label-isolated" if diag.get("label_seeded") else "whole-mask"
+    seeded = {"face": "label-isolated/face", "flood": "label-isolated/flood",
+              "whole": "whole-mask"}.get(diag.get("label_seeded"), "whole-mask")
     print(f"  {year}: {diag['n_gcp']} ICP-matched GCPs (epsilon={diag['epsilon']:g}px, "
           f"hue={diag['hue_range']}, {seeded}), RMSE={rmse:.2f}m max_err={max_err:.2f}m, "
           f"pixel_size~{pixel_size:.3f}m/px")
