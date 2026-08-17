@@ -32,15 +32,20 @@ norgeibilder.no screenshot" below). **Start with `auto_gcp.py`** - it
 does this fully automatically, batching through every screenshot in a
 property's folder with no human clicking corners; `georeference_screenshot.py`
 is the manual fallback for whichever specific years it can't confidently
-fit on its own. **Working end to end, for real**: all 43
+fit on its own. **Working end to end, for real**: 41 of the 43
 manually-captured screenshots on hand across four real properties -
 123/9 Etnedal (8), 14/987 Nittedal (14), 124/9 Etnedal (8), and 126/64
 Etnedal (13) - are georeferenced fully automatically via `auto_gcp.py`,
-zero exceptions, visually confirmed correct against the live boundary
-for every one (see `auto_gcp.py`'s documented failure modes/fixes
-below, especially fix 5, for how that went from "most of them" to "all
-of them"). `plot_overlay.py`'s batch mode (see "Per-property output
-folder" below) regenerates every overlay in one command.
+visually confirmed correct against the live boundary for every one (see
+`auto_gcp.py`'s documented failure modes/fixes below, especially fixes
+5, 7, and 8, for how that went from "most of them" to "nearly all of
+them"). The two exceptions - 123/9 Etnedal's 1991 and 124/9 Etnedal's
+2016 - are genuinely under-constrained screenshots (too few reliable,
+well-spread real corners visible in frame) that fix 8 correctly
+recognized as unreliable rather than silently accepting a wrong result;
+they're queued for the manual fallback (`georeference_screenshot.py`,
+see below) next. `plot_overlay.py`'s batch mode (see "Per-property
+output folder" below) regenerates every overlay in one command.
 
 ## Full workflow, step by step
 
@@ -601,18 +606,107 @@ fits "succeeded" by every check above and were still visibly wrong:
    properties' 43 screenshots still fit fully automatically, and every
    single one now measures *exactly* zero rotation, with no case
    needing the fallback at all once the search was correct.
+7. **A touching neighbor, or an unrelated crossing line, can still fuse
+   into the target's own contour even with fix 3's label-seeded flood
+   fill.** Flood fill only fails safely when the boundary mask has an
+   actual *gap* to escape through; it has no way to stop at a real,
+   solid junction where the target's own line touches a different
+   parcel's at a shared corner (no gap - just a pixel two lines
+   legitimately pass through) or where an unrelated parcel's edge
+   happens to cross the frame nearby, fusing into the same connected
+   blob without ever being adjacent to the target's polygon in world
+   space at all. Confirmed on 126/64 Etnedal's own real screenshots,
+   both ways: 2016's line touches a neighbor at one corner (flood fill
+   leaked into ~80% of the frame instead of stopping at the property
+   line); 2019/2025/2011/2006/2001/1986 each have a *different*,
+   unrelated parcel's boundary crossing through frame, fused into the
+   same whole-mask blob. Fixed with `extract_target_face_contour()`: a
+   planar-graph approach instead of flood fill - treat the boundary-
+   color mask's line segments as a graph (`shapely.ops.polygonize`,
+   which nodes real crossings automatically and, by construction, never
+   includes an edge that doesn't close into a ring), then pick whichever
+   enclosed face contains the target's own gnr/bnr label. A dangling
+   neighbor edge, or an unrelated crossing line, simply never becomes
+   part of any face - no special-case detection needed. Getting the
+   *ordering* right mattered again, the same lesson as fix 6: isolation
+   quality (face > flood-fill > whole-mask) had to become its own
+   outermost search tier, above color and rotation, because a cruder
+   unisolated fit for the *confirmed* color could otherwise pass
+   verification and win before the correctly-isolated fit for a
+   *different* color was ever tried - confirmed on 6 of 126/64 Etnedal's
+   13 screenshots, where the bad whole-mask candidate's wrongness showed
+   up as an implausible scale (e.g. 2019 fit at 0.045 m/px, ~8x too
+   fine) rather than rotation this time, since fix 6 already closed that
+   escape hatch. All 13 of 126/64 Etnedal's screenshots re-verified
+   visually against the live boundary after this fix, including all 7
+   that were visibly wrong before it.
+8. **The remaining sanity checks were all still too loose to catch a
+   self-consistent-but-wrong fit once fixes 5-7 closed the shear/
+   rotation/fused-contour escape hatches.** Investigating fix 7 above
+   surfaced three more real cases on the other properties, none
+   previously caught:
+   - **Pixel-size ceiling, 50 m/px.** Real pixel size across all four
+     properties' 43 screenshots ranges 0.035-1.324 m/px - nowhere near
+     50. 123/9 Etnedal's 2011 screenshot (only 4-5 ICP-matched GCPs,
+     from a frame-clipped view of a large forest parcel) converged to
+     17.6 m/px, 13x the highest genuinely-good value ever seen, but
+     still well under the old ceiling. Tightened to 10 m/px (~7.5x
+     headroom over the highest confirmed-good real value) - 2011 now
+     fits correctly (5 GCPs, RMSE 1.79m, pixel size 0.715 m/px),
+     re-verified visually.
+   - **New check: matched GCPs must span at least 30% of the image's
+     diagonal.** A handful of GCPs clustered in one small corner of the
+     frame can fit *each other* deceptively tightly - a low RMSE - while
+     leaving the transform's overall scale essentially unconstrained.
+     124/9 Etnedal's 2016 matched 4 GCPs spanning just 24x23px of a
+     1402x990 image (2% of the diagonal) and landed on a pixel size 2x
+     every other year of the *same* property (all consistently ~0.165
+     m/px, since norgeibilder's viewer zoom for a fixed property is
+     consistent) - RMSE 0.63m looked fine in isolation. Every
+     genuinely-good fit across all 43 real screenshots spans at least
+     44% of the image diagonal; both known-bad cases found so far span
+     under 7% - the 30% threshold sits with wide margin on both sides.
+   - **`frac_outside` ceiling, 0.9** (how much of the known boundary,
+     reprojected through the candidate transform, lands outside the
+     image bounds). Found by checking this metric directly against
+     every real screenshot rather than assuming the existing 0.9 cutoff
+     was tight enough: both cases above land at 0.82-0.89 - technically
+     under 0.9, so neither was ever flagged - while every genuinely-good
+     fit across all 43 screenshots stays at or under 0.045. Tightened to
+     0.2. This is also what caught the third case: **123/9 Etnedal's
+     1991 screenshot had been silently wrong on the live site since
+     before this investigation**, passing every check that existed at
+     the time (RMSE 1.22m, pixel size 0.035 m/px, both individually
+     plausible) - only checking `frac_outside` directly surfaced it
+     (0.887), not something the RMSE number alone ever hinted at.
 
-**Verified on all four properties' full real screenshot sets**: every
-single screenshot across 123/9 Etnedal (8), 14/987 Nittedal (14), 124/9
-Etnedal (8), and 126/64 Etnedal (13) - 43 screenshots total, zero
-exceptions - now fits fully automatically, visually confirmed correct
-via `plot_overlay.py`, not just numerically plausible. That weren't
-always all: `georeference_screenshot.py`'s manual fallback (below) put
-in genuine work fitting 124/9 Etnedal's 1986/1991 and 126/64 Etnedal's
-1986/1991/2001/2011 by hand at the time (see the manual-fallback
-section's own worked example) - fix 5 above is what later made even
-those fit automatically on a from-scratch re-run, not a claim that
-they always had.
+   124/9 Etnedal's 2016 and 123/9 Etnedal's 1991 still don't get a
+   confident automatic fit even after all three tightened checks -
+   every candidate the search tries for either one, including
+   `fit_similarity()`'s rotation fallback (fix 6), still fails at least
+   one check or is visibly wrong when checked against the live boundary.
+   These are genuinely under-constrained screenshots (too few reliable,
+   well-spread real corners captured in frame), not a bug to keep
+   chasing with ever-narrower heuristics - excluded from their
+   properties' current output (via `auto_gcp.py --years`, rather than
+   left in with a silently wrong result) and queued for
+   `georeference_screenshot.py`'s manual fallback below.
+
+**Verified on all four properties' full real screenshot sets**: 41 of
+43 screenshots across 123/9 Etnedal (8), 14/987 Nittedal (14), 124/9
+Etnedal (8), and 126/64 Etnedal (13) now fit fully automatically,
+visually confirmed correct via `plot_overlay.py`, not just numerically
+plausible - the remaining two (123/9 Etnedal's 1991, 124/9 Etnedal's
+2016) are queued for the manual fallback below (see fix 8's own
+paragraph just above for why). That 41 weren't always the number, and
+won't necessarily stay the number: `georeference_screenshot.py`'s
+manual fallback (below) put in genuine work fitting 124/9 Etnedal's
+1986/1991 and 126/64 Etnedal's 1986/1991/2001/2011 by hand at the time
+(see the manual-fallback section's own worked example) - fix 5 above is
+what later made even those fit automatically on a from-scratch re-run,
+and fixes 7-8 did the same for six more of 126/64's years and one of
+123/9's. Each fix closed a specific, evidenced gap; there's no
+guarantee the next new screenshot won't find another one.
 
 `auto_gcp.py` still fails loudly (an error, or reporting no confident
 match) rather than silently accepting a wrong registration on whichever
@@ -625,14 +719,15 @@ produced each year's fit.
 ### Manual fallback (`georeference_screenshot.py`)
 
 Only needed for a year `auto_gcp.py` couldn't confidently fit on its
-own (above) - currently none of this project's four real properties has
-any (all 43 real screenshots tested to date fit automatically - see
-`auto_gcp.py`'s fix 5 above), though a low-quality or unusually-cropped
-screenshot could still land here for a property not yet tested. Also
-worth knowing even though it's not live on any current property: 124/9
-Etnedal's 1986/1991 and 126/64 Etnedal's 1986/1991/2001/2011 were real,
-genuine uses of this fallback at the time (before fix 5 made even those
-fit automatically on a later re-run) - real sessions, not hypotheticals,
+own (above) - currently two: 123/9 Etnedal's 1991 and 124/9 Etnedal's
+2016 (see `auto_gcp.py`'s fix 8 above for why they're excluded rather
+than left in with a silently-wrong automatic result), not yet worked
+through this fallback as of this writing. A low-quality or
+unusually-cropped screenshot could land here for any property, not just
+these two. Also worth knowing: 124/9 Etnedal's 1986/1991 and 126/64
+Etnedal's 1986/1991/2001/2011 were real, genuine uses of this fallback
+at an earlier point in the project (before fix 5 made even those fit
+automatically on a later re-run) - real sessions, not hypotheticals,
 though the worked example just below (123/9, a generic illustration
 predating that work) isn't itself from either of them.
 Deliberately approximate, not a substitute for a real WMS download -
