@@ -77,23 +77,25 @@ How it works
    a self-consistent but wrong registration: a low RMSE on a small,
    locally-agreeing subset of points (e.g. a repetitive zigzag section
    of the boundary matching itself at the wrong offset), with the
-   *global* transform left nonsensical - degenerate/anisotropic scale,
-   or the image effectively rotated ~25-160 degrees from reality - while
-   still reporting a deceptively low RMSE. A low RMSE alone is
-   therefore not sufficient evidence of a correct fit.
+   *global* transform left nonsensical - the image effectively rotated
+   ~25-160 degrees from reality - while still reporting a deceptively
+   low RMSE. A low RMSE alone is therefore not sufficient evidence of a
+   correct fit. (Degenerate/anisotropic scale used to be a second real
+   failure mode here too, but every transform this module fits - seeds
+   and every ICP iteration alike, via fit_similarity() in
+   georeference_screenshot.py - is now a constrained similarity
+   transform, isotropic *by construction*, so that failure mode isn't
+   reachable anymore, not just checked for after the fact.)
 6. So every ICP result, not just the eventual winner, is filtered
-   *before* RMSE is allowed to pick between them: _is_isotropic rejects
-   transforms whose two axis scales differ by more than 15% (every
-   genuine fit on real data lands within ~0.6%; the observed failure
-   case was 2.36x), and _is_plausible_rotation rejects anything more
-   than 20 degrees from north-up (real screenshots are all ~0 degrees;
-   observed failures ranged 25-160 degrees) - norgeibilder.no's viewer
-   has no rotation control, so every genuine screenshot is north-up.
-   Only among the survivors does the lowest final RMSE win, and
-   verify_registration() then double-checks that winner once more
-   (isotropy and rotation again, plus: RMSE relative to implied pixel
-   size, and the known boundary - projected into pixel space - mostly
-   landing within the image bounds) before it's trusted.
+   *before* RMSE is allowed to pick between them: _is_plausible_rotation
+   rejects anything more than 20 degrees from north-up (real screenshots
+   are all ~0 degrees; observed failures ranged 25-160 degrees) -
+   norgeibilder.no's viewer has no rotation control, so every genuine
+   screenshot is north-up. Only among the survivors does the lowest
+   final RMSE win, and verify_registration() then double-checks that
+   winner once more (rotation again, plus: RMSE relative to implied
+   pixel size, and the known boundary - projected into pixel space -
+   mostly landing within the image bounds) before it's trusted.
 
 This is deliberately not attempted for photos where the boundary color
 isn't a clean, isolable magenta (e.g. very low-contrast historical
@@ -137,7 +139,7 @@ from scipy.spatial import cKDTree
 from PIL import Image
 
 from property import fetch_property
-from georeference_screenshot import simplified_vertices, fit_affine, write_boundary_geojson, \
+from georeference_screenshot import simplified_vertices, fit_similarity, write_boundary_geojson, \
     _merge_into_manifest
 from plot_overlay import find_input_screenshots
 
@@ -669,7 +671,7 @@ def _icp_refine(seed_transform, pixel_pts, ring_tree, ring_coords,
             kept = np.nonzero(keep)[0]
         mw = [tuple(ring_coords[idxs[i]]) for i in kept]
         mp = [tuple(pixel_arr[i]) for i in kept]
-        current, rmse, max_err, errors = fit_affine(mw, mp)
+        current, rmse, max_err, errors = fit_similarity(mw, mp)
         result = (current, rmse, max_err, mw, mp, errors)
         gate = max(min_gate_m, gate * shrink)
     return result
@@ -679,7 +681,7 @@ def verify_registration(transform, rmse, img_shape, world_polygon):
     """Sanity checks after fitting - catches a wrong contour pick or a
     bad alignment (which would otherwise silently produce a
     plausible-looking but wrong GeoTIFF), rather than trusting the fit
-    just because fit_affine() returned a number."""
+    just because fit_similarity() returned a number."""
     height, width = img_shape[:2]
     pixel_size = float(np.hypot(transform.a, transform.d) + np.hypot(transform.b, transform.e)) / 2
     reasons = []
@@ -702,8 +704,6 @@ def verify_registration(transform, rmse, img_shape, world_polygon):
     # up for a genuinely coarse screenshot, not just a fine one).
     if rmse > max(5.0, 3 * pixel_size):
         reasons.append(f"RMSE {rmse:.1f}m is large relative to pixel size {pixel_size:.2f}m/px")
-    if not _is_isotropic(transform):
-        reasons.append("transform scale is not isotropic (likely a degenerate fit)")
     if not _is_plausible_rotation(transform):
         reasons.append(f"implied rotation {_rotation_angle_deg(transform):.1f} deg is not "
                         f"plausible for a north-up screenshot")
@@ -724,13 +724,6 @@ def verify_registration(transform, rmse, img_shape, world_polygon):
     return (len(reasons) == 0), reasons, pixel_size
 
 
-MAX_SCALE_ANISOTROPY = 1.15  # max allowed ratio between a transform's two axis scales -
-                              # every genuine fit on this project's real screenshots landed
-                              # within 0.6% of a perfectly square pixel (ratio ~1.000-1.006);
-                              # a degenerate fit (points too clustered/collinear to properly
-                              # constrain the affine fit) was directly observed at ratio 2.36 -
-                              # this threshold has ample margin above the real cases while
-                              # firmly excluding that failure mode
 MAX_ROTATION_DEG = 20.0      # max allowed deviation from north-up (see _is_plausible_rotation)
 
 
@@ -758,27 +751,19 @@ def _is_plausible_rotation(transform, max_deg=MAX_ROTATION_DEG):
     # needed. Deliberately not treated as "close to 0 mod 180": a true
     # 180-degree-flipped (upside-down) registration is exactly as wrong
     # as any other large rotation and must be rejected the same way.
+    #
+    # This project used to also separately check the transform's two
+    # axis scales weren't anisotropic (a real failure mode once seen on
+    # a real screenshot: ICP locked onto a repetitive zigzag section of
+    # the boundary and produced one axis ~30x the other's scale, while
+    # still reporting a deceptively low RMSE) - now removed as
+    # unreachable dead code, not just unneeded: fit_similarity()
+    # (georeference_screenshot.py) fits a constrained similarity
+    # transform, which is isotropic *by construction*, so every
+    # transform this module ever produces already satisfies that
+    # check unconditionally.
     angle = _rotation_angle_deg(transform)
     return abs(angle) <= max_deg
-
-
-def _is_isotropic(transform, max_ratio=MAX_SCALE_ANISOTROPY):
-    """A genuine screenshot-to-world transform has very close to the
-    same scale in both pixel axes (screenshots aren't stretched
-    differently in x vs y). A wildly anisotropic fit - verified as a
-    real failure mode on this project's actual 1991 screenshot, where
-    ICP locked onto a small, repetitive zigzag section of the boundary
-    and produced a transform with one axis ~30x the other's scale,
-    while still reporting a deceptively low RMSE on that self-selected
-    handful of points - is a strong, cheap signal the fit is degenerate
-    (under-constrained by near-collinear or clustered points), and
-    should be disqualified before it's allowed to win on RMSE alone."""
-    scale_x = np.hypot(transform.a, transform.d)
-    scale_y = np.hypot(transform.b, transform.e)
-    if scale_x <= 0 or scale_y <= 0:
-        return False
-    ratio = max(scale_x / scale_y, scale_y / scale_x)
-    return ratio <= max_ratio
 
 
 def _generate_seeds(pixel_pts, pixel_closed, world_polygon, top_k_dp_seeds):
@@ -805,7 +790,7 @@ def _generate_seeds(pixel_pts, pixel_closed, world_polygon, top_k_dp_seeds):
                 if len(gw) < 3:
                     continue
                 try:
-                    seed_transform, _, _, _ = fit_affine(gw, gp)
+                    seed_transform, _, _, _ = fit_similarity(gw, gp)
                 except np.linalg.LinAlgError:
                     continue
                 seeds.append(seed_transform)
@@ -880,7 +865,7 @@ def auto_extract_gcps(screenshot_path, world_polygon,
                     transform, rmse, max_err, gcps_world, gcps_pixel, errors = icp_result
                     if len(gcps_world) < ICP_MIN_POINTS:
                         continue
-                    if not _is_isotropic(transform) or not _is_plausible_rotation(transform):
+                    if not _is_plausible_rotation(transform):
                         continue
 
                     if local_best is None or rmse < local_best[0]:
@@ -925,6 +910,7 @@ def auto_extract_gcps(screenshot_path, world_polygon,
         return local_best, attempts, True
 
     best = None
+    best_ok = False
     attempts = 0
     tried_any_contour = False
     for h_lo, h_hi in color_candidates:
@@ -933,22 +919,41 @@ def auto_extract_gcps(screenshot_path, world_polygon,
         tried_any_contour = tried_any_contour or contour_found
         if local_best is None:
             continue
-        # boundary_color=None (free auto-detection): every candidate is
-        # equally untrusted, so search all of them and let the lowest
-        # RMSE that passes the sanity checks win, same as always.
+
+        if boundary_color is None:
+            # free auto-detection: every candidate is equally untrusted,
+            # so search all of them and let the lowest RMSE that passes
+            # the sanity checks win, same as always.
+            if best is None or local_best[0] < best[0]:
+                best = local_best
+            continue
+
         # boundary_color given: color_candidates[0] is the confirmed,
         # trusted color and the rest are only a drift-tolerance fallback
-        # for when it fails outright (see the fallback's docstring
-        # above) - competing a fallback hue against an already-working
-        # confirmed-color fit purely on RMSE risks a razor-thin, wrong
-        # win (verified directly: 14/987 Nittedal's 2017 screenshot had
-        # a stray hue candidate beat the correct green line by 0.01m
-        # RMSE while being visibly worse - 18.9 deg of implied rotation
-        # vs. 5.8 deg). So once *any* candidate produces a valid fit,
-        # stop rather than keep shopping for a lower RMSE elsewhere.
-        if best is None or (boundary_color is None and local_best[0] < best[0]):
+        # for when it doesn't actually produce a trustworthy fit - not
+        # just "produces something", but something that would itself
+        # pass verify_registration's own bar (checked here directly,
+        # not a separate, looser threshold that could drift out of sync
+        # with it - the internal per-candidate filter above only checks
+        # rotation plausibility, not RMSE-vs-pixel-size). Verified this
+        # distinction matters for real: 126/64 Etnedal's confirmed color
+        # still found *some* candidate passing that looser filter for
+        # 2019/2023 (RMSE 9.66m/5.26m - clearly the wrong color for
+        # those specific years, a real drift case, see
+        # detect_boundary_colors' docstring), which used to stop the
+        # search right there, before ever trying the color that
+        # actually fit those years well. Once any color's result
+        # genuinely passes, stop - competing a fallback hue against an
+        # already-good confirmed-color fit purely on RMSE risks a
+        # razor-thin, wrong win instead (verified separately: 14/987
+        # Nittedal's 2017 screenshot had a stray hue candidate beat the
+        # correct green line by 0.01m RMSE while being visibly worse -
+        # 18.9 deg of implied rotation vs. 5.8).
+        ok, _, _ = verify_registration(local_best[4], local_best[0], img.shape, world_polygon)
+        if best is None or (ok and not best_ok) or (ok == best_ok and local_best[0] < best[0]):
             best = local_best
-        if boundary_color is not None:
+            best_ok = ok
+        if ok:
             break
 
     if not tried_any_contour:

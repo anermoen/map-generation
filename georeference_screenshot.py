@@ -22,10 +22,15 @@ viewer draws from), a screenshot the boundary is visible in already
 contains everything needed to work out pixel -> real-world coordinates:
 pick a handful of points where the boundary line has a recognizable
 kink/corner, match each to its known real-world (easting, northing), and
-fit the standard 6-parameter affine transform (translation + a 2x2
-linear map) relating pixel (col, row) to UTM (easting, northing) -
-exactly the "world file" technique used to georeference scanned paper
-maps for decades, applied here to a screenshot instead.
+fit a similarity transform (uniform scale + one rotation angle +
+translation - see fit_similarity()) relating pixel (col, row) to UTM
+(easting, northing) - the same idea as the "world file" technique used
+to georeference scanned paper maps for decades, applied here to a
+screenshot instead, but deliberately not the further-general 6-parameter
+affine that technique usually allows: see fit_similarity()'s own
+docstring for why shear/independent-axis-scaling has no physical
+meaning here and is excluded from the model entirely, not just
+discouraged.
 
 This is deliberately NOT as accurate as a real, properly-served GeoTIFF:
 accuracy is limited by how precisely GCP pixels can be clicked (a few
@@ -67,21 +72,25 @@ Workflow (three subcommands)
    just a convenience.)
 
 3. fit: pairs up vertex indices (from step 1) with pixel coordinates
-   (from step 2 or elsewhere), fits the affine transform, reports the
-   fit's residual error in meters, and writes a tagged GeoTIFF plus a
-   manifest.json entry in the same format download_images.py produces.
+   (from step 2 or elsewhere), fits the similarity transform (see
+   fit_similarity()), reports the fit's residual error in meters, and
+   writes a tagged GeoTIFF plus a manifest.json entry in the same
+   format download_images.py produces.
 
        python3 georeference_screenshot.py fit \\
            --kommune Etnedal --gnr 123 --bnr 9 \\
            --screenshot photo_2016.png --year 2016 \\
            --gcp 4:512:300 --gcp 11:800:120 --gcp 27:200:900 --gcp 61:50:400
 
-   (--gcp VERTEX_INDEX:PIXEL_X:PIXEL_Y, repeatable. Needs at least 3 -
-   the minimum to solve a 2D affine transform - but with exactly 3 the
-   fit is always mathematically exact regardless of true accuracy, so
-   its reported error is meaningless; use 4+, spread around the
-   property and not collinear, for both a better fit and a real error
-   estimate.)
+   (--gcp VERTEX_INDEX:PIXEL_X:PIXEL_Y, repeatable. The code requires at
+   least 3, a practical safety margin above the true minimum - a
+   similarity transform only has 4 unknowns, so 2 well-separated points
+   are actually enough to solve it exactly. That's also why, unlike the
+   general 6-parameter affine this project used to fit, even exactly 3
+   GCPs now gives a real, meaningful residual error rather than an
+   always-zero one - every point beyond the 2 truly needed adds genuine
+   redundancy to check against. Still, use 4+, spread around the
+   property and not collinear, for a better-constrained fit.)
 
 Requires the same dependencies as download_images.py, plus matplotlib
 (list-vertices, pick).
@@ -216,24 +225,52 @@ def parse_gcp(s):
             f"--gcp must be VERTEX_INDEX:PIXEL_X:PIXEL_Y (int:float:float), got {s!r}")
 
 
-def fit_affine(gcps_world, gcps_pixel):
+def fit_similarity(gcps_world, gcps_pixel):
     """gcps_world: list of (easting, northing); gcps_pixel: list of
     (pixel_x, pixel_y), same order/length (>=3). Returns (rasterio Affine
-    mapping pixel->world, rmse_m, max_error_m, per-point error array)."""
+    mapping pixel->world, rmse_m, max_error_m, per-point error array).
+
+    Fits a *similarity* transform (uniform scale + one rotation angle +
+    translation - 4 real degrees of freedom), not a general 6-parameter
+    affine. This is deliberate, not a simplification: the screenshots
+    being georeferenced are captures of an already-orthorectified web
+    map view (norgeibilder.no serves true orthophotos, and a 2D map
+    viewer pans/zooms/[not-]rotates without ever shearing or unevenly
+    stretching what it shows) - so the *true* pixel-to-world
+    relationship can only ever be a rotation and a uniform scale, never
+    shear or independent x/y scaling. An unconstrained 6-parameter
+    affine fit can still "explain" GCP correspondence noise by
+    inventing a small amount of shear/anisotropic scale that has no
+    physical meaning, subtly distorting the photo's true proportions
+    even on fits that otherwise look fine - constraining the fit
+    to a similarity transform makes that impossible by construction,
+    rather than trying to catch it after the fact (which is what
+    auto_gcp.py's old isotropy sanity check was papering over - now
+    removed as redundant, since every fit from this function is
+    isotropic and shear-free by definition, not just usually so).
+
+    The 4 unknowns (p, q, c, f - where p=s*cos(theta), q=s*sin(theta)
+    for scale s and rotation theta) are solved by ordinary linear
+    least squares, same as the previous 6-parameter version, just with
+    the shear/anisotropic-scale degrees of freedom removed from the
+    model entirely: easting = p*col + q*row + c,
+    northing = q*col - p*row + f (the "-row"/sign pattern accounts for
+    pixel row increasing downward while northing increases upward)."""
     n = len(gcps_world)
     if n < 3:
-        raise ValueError(f"Need at least 3 GCPs to fit a 2D affine transform, got {n}")
+        raise ValueError(f"Need at least 3 GCPs to fit a 2D similarity transform, got {n}")
 
-    A = np.zeros((2 * n, 6))
+    A = np.zeros((2 * n, 4))
     b = np.zeros(2 * n)
     for i, ((px, py), (ex, nx)) in enumerate(zip(gcps_pixel, gcps_world)):
-        A[2 * i] = [px, py, 1, 0, 0, 0]
-        A[2 * i + 1] = [0, 0, 0, px, py, 1]
+        A[2 * i] = [px, py, 1, 0]
+        A[2 * i + 1] = [-py, px, 0, 1]
         b[2 * i] = ex
         b[2 * i + 1] = nx
 
     params, _, _, _ = np.linalg.lstsq(A, b, rcond=None)
-    a_, b_, c_, d_, e_, f_ = params
+    p_, q_, c_, f_ = params
+    a_, b_, d_, e_ = p_, q_, q_, -p_
     transform = Affine(a_, b_, c_, d_, e_, f_)
 
     predicted = np.array([[a_ * px + b_ * py + c_, d_ * px + e_ * py + f_]
@@ -280,7 +317,7 @@ def cmd_fit(args):
         gcps_world.append(coords[idx])
         gcps_pixel.append((px, py))
 
-    transform, rmse, max_err, errors = fit_affine(gcps_world, gcps_pixel)
+    transform, rmse, max_err, errors = fit_similarity(gcps_world, gcps_pixel)
 
     print(f"Fitted affine transform from {len(args.gcp)} GCPs:")
     for (idx, px, py), err in zip(args.gcp, errors):

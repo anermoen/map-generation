@@ -32,13 +32,15 @@ norgeibilder.no screenshot" below). **Start with `auto_gcp.py`** - it
 does this fully automatically, batching through every screenshot in a
 property's folder with no human clicking corners; `georeference_screenshot.py`
 is the manual fallback for whichever specific years it can't confidently
-fit on its own. **Working end to end, for real**: all 8
-manually-captured screenshots on hand for 123/9 (1958, 1970, 1986, 1991,
-2006, 2011, 2016, 2025) are georeferenced fully automatically via
-`auto_gcp.py` (RMSE 0.9-2.5 m each) - `plot_overlay.py`'s batch mode (see
-"Per-property output folder" below) regenerates every overlay in one
-command. 14/987 Nittedal similarly has all 14 of its screenshots fit
-fully automatically (RMSE 0.04-1.7 m).
+fit on its own. **Working end to end, for real**: all 43
+manually-captured screenshots on hand across four real properties -
+123/9 Etnedal (8), 14/987 Nittedal (14), 124/9 Etnedal (8), and 126/64
+Etnedal (13) - are georeferenced fully automatically via `auto_gcp.py`,
+zero exceptions, visually confirmed correct against the live boundary
+for every one (see `auto_gcp.py`'s documented failure modes/fixes
+below, especially fix 5, for how that went from "most of them" to "all
+of them"). `plot_overlay.py`'s batch mode (see "Per-property output
+folder" below) regenerates every overlay in one command.
 
 ## Full workflow, step by step
 
@@ -298,11 +300,13 @@ boundary) overlay turned on - so a screenshot already has the
 property's boundary drawn on it, in exactly the shape and position
 property.py already knows the real-world coordinates of. That's enough
 to georeference the screenshot directly: match boundary corners in the
-image to their known (easting, northing), and fit the same kind of
-6-parameter affine ("world file") transform used to georeference
-scanned paper maps - sidestepping the WMS token requirement entirely
-(see "Blocker" above), chosen because none of the three routes to a
-real GeoID token fit this project's current stage.
+image to their known (easting, northing), and fit a similarity
+transform (uniform scale + rotation + translation - the same idea as
+the "world file" technique used to georeference scanned paper maps, but
+constrained to what an orthophoto screenshot's geometry actually allows
+- see `auto_gcp.py`'s fix 5 below for why) - sidestepping the WMS token
+requirement entirely (see "Blocker" above), chosen because none of the
+three routes to a real GeoID token fit this project's current stage.
 
 Two scripts do this, and **they take their arguments differently** -
 worth knowing before you type anything, since using one script's
@@ -504,33 +508,80 @@ fits "succeeded" by every check above and were still visibly wrong:
    visually pixel-perfect against the live boundary). Regression-tested
    against every already-fitted year across all four properties tested
    to date (43 screenshots) - no previously-good fit newly failed.
+5. **The fitted transform could shear or scale the photo's two axes
+   unevenly - geometrically meaningless for an orthophoto.** Every fit
+   up to this point solved for a general 6-parameter affine transform
+   (independent x/y scale, plus shear) rather than being constrained to
+   what a screenshot of an orthophoto actually *can* be related to
+   world coordinates by: a rotation and a single uniform scale, nothing
+   more (norgeibilder.no serves true orthophotos, and a 2D map viewer
+   pans/zooms/[not-]rotates without ever shearing or unevenly
+   stretching what it shows). The isotropy/rotation sanity checks
+   further up existed only because of this - post-hoc filters for a
+   failure mode the fitting model itself shouldn't have been able to
+   produce in the first place. `fit_similarity()`
+   (`georeference_screenshot.py`, used by both `auto_gcp.py` and the
+   manual fallback below) now solves for the correct, smaller 4-unknown
+   model directly (uniform scale + rotation + translation) - shear and
+   anisotropic scale aren't rejected after the fact anymore, they're
+   simply not representable, so `_is_isotropic()` became unconditionally
+   true and was removed as dead code rather than kept as a vestigial
+   check. Verified this wasn't just a purity improvement: re-running
+   every already-fitted screenshot across all four properties (43
+   total) under the new constraint, *every single one* - including
+   every year that previously needed `georeference_screenshot.py`'s
+   manual fallback - now fits automatically, several with visibly
+   better accuracy than before. The likely reason: removing shear/
+   anisotropic-scale as an escape hatch means a wrong point
+   correspondence can no longer be locally "explained away" by
+   inventing unphysical distortion, so ICP is forced to either
+   genuinely converge correctly or fail cleanly, rather than settling
+   into a self-consistent-looking but wrong local optimum. Fixing this
+   also surfaced a second, related bug: `auto_gcp.py`'s confirmed-color
+   tiering (fix 2 above) decided whether to stop searching fallback
+   hues using a looser internal filter than `verify_registration()`'s
+   real bar, so a forced color that technically "passed" the loose
+   filter but was actually just the wrong (drifted) color for that
+   year - real case: 126/64 Etnedal's 2019 and 2023 screenshots, RMSE
+   9.66m and 5.26m under the confirmed-but-wrong hue - could stop the
+   search before ever trying the hue that actually fit well. Fixed by
+   having the tiering decision call `verify_registration()` itself,
+   the same check that will decide pass/fail anyway, instead of a
+   separate threshold that could silently drift out of sync with it.
 
-**Verified on both properties' full real screenshot sets**: all 8 of
-123/9 Etnedal's (1958, 1970, 1986, 1991, 2006, 2011, 2016, 2025) and all
-14 of 14/987 Nittedal's (1946, 1969, 1976, 1986, 2002, 2006, 2009, 2013,
-2015, 2017, 2019, 2021, 2023, 2025) fit automatically, visually
-confirmed correct via `plot_overlay.py` for every one, not just
-spot-checked. Fix 3 above took Nittedal from 13/14 to a genuine 14/14 -
-its previous holdout, 2002 (cropped tightly enough that the whole
-property isn't visible in frame, violating the bounding-box seed
-strategy's assumption) - now isolates cleanly too; RMSE across
-Nittedal's label-isolated years dropped to 0.04-0.68 m (rotation under
-1 degree on 12 of 13 of them), down from 0.1-1.8 m (rotation up to
-9 degrees) beforehand. `auto_gcp.py` still fails loudly (an error, or
-reporting no confident match) rather than silently accepting a wrong
-registration on whichever year, someday, defeats all of the above -
-`georeference_screenshot.py`'s manual workflow (below) is the intended
-fallback for that case, and `manifest.json`'s `georeferencing_method`
-field always records which path (`automatic_gcp_extraction` vs.
-`manual_gcp_affine_fit`) produced each year's fit.
+**Verified on all four properties' full real screenshot sets**: every
+single screenshot across 123/9 Etnedal (8), 14/987 Nittedal (14), 124/9
+Etnedal (8), and 126/64 Etnedal (13) - 43 screenshots total, zero
+exceptions - now fits fully automatically, visually confirmed correct
+via `plot_overlay.py`, not just numerically plausible. That weren't
+always all: `georeference_screenshot.py`'s manual fallback (below) put
+in genuine work fitting 124/9 Etnedal's 1986/1991 and 126/64 Etnedal's
+1986/1991/2001/2011 by hand at the time (see the manual-fallback
+section's own worked example) - fix 5 above is what later made even
+those fit automatically on a from-scratch re-run, not a claim that
+they always had.
+
+`auto_gcp.py` still fails loudly (an error, or reporting no confident
+match) rather than silently accepting a wrong registration on whichever
+year, someday, defeats all of the above - `georeference_screenshot.py`'s
+manual workflow (below) remains the intended fallback for that case,
+and `manifest.json`'s `georeferencing_method` field always records
+which path (`automatic_gcp_extraction` vs. `manual_gcp_affine_fit`)
+produced each year's fit.
 
 ### Manual fallback (`georeference_screenshot.py`)
 
 Only needed for a year `auto_gcp.py` couldn't confidently fit on its
-own (above) - currently neither of this project's two real properties
-has any (all 8 of 123/9 Etnedal's and all 14 of 14/987 Nittedal's fit
-automatically), though a low-quality or unusually-cropped screenshot
-could still land here for a property not yet tested.
+own (above) - currently none of this project's four real properties has
+any (all 43 real screenshots tested to date fit automatically - see
+`auto_gcp.py`'s fix 5 above), though a low-quality or unusually-cropped
+screenshot could still land here for a property not yet tested. Also
+worth knowing even though it's not live on any current property: 124/9
+Etnedal's 1986/1991 and 126/64 Etnedal's 1986/1991/2001/2011 were real,
+genuine uses of this fallback at the time (before fix 5 made even those
+fit automatically on a later re-run) - real sessions, not hypotheticals,
+though the worked example just below (123/9, a generic illustration
+predating that work) isn't itself from either of them.
 Deliberately approximate, not a substitute for a real WMS download -
 accuracy is limited by screenshot resolution (whatever zoom level the
 browser was at, not the source photo's native resolution) and how
@@ -564,11 +615,13 @@ Workflow (subcommand first - see the CLI-shape callout above):
     # -> fits the transform, reports RMSE, writes a tagged GeoTIFF +
     #    manifest.json entry in the same format download_images.py uses
 
-Needs at least 3 GCPs (the minimum for a 2D affine fit); 4+, well spread
-around the property and not collinear, both improves the fit and gives a
-meaningful error estimate (with exactly 3 the fit is mathematically
-exact through all three points regardless of true accuracy, so its
-reported RMSE is ~0 by construction, not a real check).
+Needs at least 3 GCPs - a practical safety margin, not the true minimum:
+`fit_similarity()`'s constrained model (see `auto_gcp.py`'s fix 5 above)
+has only 4 unknowns, so 2 well-separated points are actually enough to
+solve it exactly. That also means, unlike the general 6-parameter affine
+this project used to fit, even exactly 3 GCPs now gives a real,
+meaningful RMSE rather than an always-~0 one. Still, use 4+, well spread
+around the property and not collinear, for a better-constrained fit.
 
 **Verified two ways**: first end-to-end with a synthetic test screenshot
 (the property boundary rendered at a known 0.5 m/pixel, 2-degree-rotated
