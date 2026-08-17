@@ -819,7 +819,10 @@ def _icp_refine(seed_transform, pixel_pts, ring_tree, ring_coords,
     return result
 
 
-def verify_registration(transform, rmse, img_shape, world_polygon):
+MIN_GCP_SPREAD_FRAC = 0.3   # min fraction of the image diagonal the matched GCPs must span
+
+
+def verify_registration(transform, rmse, img_shape, world_polygon, gcps_pixel=None):
     """Sanity checks after fitting - catches a wrong contour pick or a
     bad alignment (which would otherwise silently produce a
     plausible-looking but wrong GeoTIFF), rather than trusting the fit
@@ -827,7 +830,46 @@ def verify_registration(transform, rmse, img_shape, world_polygon):
     height, width = img_shape[:2]
     pixel_size = float(np.hypot(transform.a, transform.d) + np.hypot(transform.b, transform.e)) / 2
     reasons = []
-    if pixel_size <= 0 or pixel_size > 50:
+    # A handful of matched GCPs clustered in one small corner of the
+    # frame can fit *each other* deceptively tightly (a low RMSE) while
+    # leaving the transform's overall scale essentially unconstrained -
+    # confirmed on two real screenshots: 124/9 Etnedal's 2016 matched 4
+    # GCPs spanning just 24x23px of a 1402x990 image (0.065 of the
+    # image's diagonal) and landed on pixel_size=0.371 m/px, more than
+    # 2x every other year of the *same* property (all ~0.165 m/px,
+    # since norgeibilder's viewer zoom for a fixed property is
+    # consistent) - RMSE=0.63m looked fine in isolation. Every
+    # genuinely-good fit across this project's real data (all four
+    # properties, matched via whichever tier - face/flood/whole) has its
+    # GCPs spanning at least 0.44 of the image diagonal; both known-bad
+    # degenerate fits found so far span under 0.07 - a 0.3 threshold
+    # sits with wide margin on both sides. gcps_pixel is optional only
+    # for callers (e.g. tests) that don't have it; skipping the check
+    # without it is not the safe default for real fitting, so every real
+    # call site threads it through.
+    if gcps_pixel is not None and len(gcps_pixel) >= 2:
+        xs = [p[0] for p in gcps_pixel]
+        ys = [p[1] for p in gcps_pixel]
+        spread = float(np.hypot(max(xs) - min(xs), max(ys) - min(ys)))
+        img_diag = float(np.hypot(width, height))
+        if img_diag > 0 and spread < MIN_GCP_SPREAD_FRAC * img_diag:
+            reasons.append(f"matched GCPs span only {spread:.0f}px "
+                            f"({spread / img_diag:.0%} of the image diagonal) - too clustered "
+                            f"to reliably constrain the transform")
+    # 50 m/px used to be the ceiling here, but that's far looser than
+    # any real screenshot this project has ever produced: across all
+    # four properties' real data, pixel size ranges 0.035-1.324 m/px
+    # (see README.md's fit-quality table) - a genuinely bad fit can
+    # still land inside a 50 m/px ceiling with room to spare. Confirmed
+    # on 123/9 Etnedal's 2011 screenshot (only 4 ICP-matched GCPs, from
+    # a frame-clipped view showing just one corner of a large forest
+    # parcel - see the module docstring's "legitimately fail" paragraph):
+    # converged to pixel_size=17.6 m/px, 13x the highest genuinely-good
+    # value ever seen, but still well under the old ceiling, so it
+    # "succeeded" and silently produced a wrong GeoTIFF instead of
+    # falling back to the documented manual workflow. 10 m/px keeps
+    # ~7.5x headroom over the highest confirmed-good real value.
+    if pixel_size <= 0 or pixel_size > 10:
         reasons.append(f"implausible pixel size {pixel_size:.2f} m/px")
     # A pure ratio check (rmse > 3*pixel_size alone) over-rejects fine-
     # resolution screenshots: Nittedal's ~0.08 m/px years genuinely run
@@ -852,7 +894,17 @@ def verify_registration(transform, rmse, img_shape, world_polygon):
 
     # the known boundary, projected into pixel space, should mostly land
     # within a generous margin of the image bounds - if it's wildly
-    # outside, the alignment is almost certainly wrong
+    # outside, the alignment is almost certainly wrong. 0.9 used to be
+    # the cutoff here, but that's far too permissive to catch a real,
+    # silently-wrong fit: confirmed on two real screenshots (124/9
+    # Etnedal's 2016 - the too-clustered-GCPs case just above - and,
+    # found only by checking this metric on every year, 123/9 Etnedal's
+    # 1991, which had been silently wrong on the live site since before
+    # this investigation) that a self-consistent-but-wrong fit lands at
+    # frac_outside 0.82-0.89 while still reporting a deceptively
+    # reasonable RMSE - vs. every genuinely-good fit across this
+    # project's real data (43 screenshots, all four properties) staying
+    # at or under 0.045. 0.2 sits with wide margin on both sides.
     Minv = np.linalg.inv(np.array([[transform.a, transform.b], [transform.d, transform.e]]))
     coords = np.array(world_polygon.exterior.coords)
     px = (Minv @ (coords - np.array([transform.c, transform.f])).T).T
@@ -860,7 +912,7 @@ def verify_registration(transform, rmse, img_shape, world_polygon):
     frac_outside = float(np.mean(
         (px[:, 0] < -margin) | (px[:, 0] > width + margin) |
         (px[:, 1] < -margin) | (px[:, 1] > height + margin)))
-    if frac_outside > 0.9:
+    if frac_outside > 0.2:
         reasons.append(f"{frac_outside:.0%} of the known boundary projects far outside the image")
 
     return (len(reasons) == 0), reasons, pixel_size
@@ -1029,7 +1081,8 @@ def auto_extract_gcps(screenshot_path, world_polygon,
                     if not _is_plausible_rotation(transform):
                         continue
 
-                    ok, _, _ = verify_registration(transform, rmse, img.shape, world_polygon)
+                    ok, _, _ = verify_registration(transform, rmse, img.shape, world_polygon,
+                                                    gcps_pixel=gcps_pixel)
                     if (local_best is None or (ok and not local_best_ok)
                             or (ok == local_best_ok and rmse < local_best[0])):
                         diagnostics = {
@@ -1135,7 +1188,8 @@ def auto_extract_gcps(screenshot_path, world_polygon,
             # Nittedal's 2017 screenshot had a stray hue candidate beat the
             # correct green line by 0.01m RMSE while being visibly worse -
             # 18.9 deg of implied rotation vs. 5.8).
-            ok, _, _ = verify_registration(local_best[4], local_best[0], img.shape, world_polygon)
+            ok, _, _ = verify_registration(local_best[4], local_best[0], img.shape, world_polygon,
+                                            gcps_pixel=local_best[3])
             if best is None or (ok and not best_ok) or (ok == best_ok and local_best[0] < best[0]):
                 best = local_best
                 best_ok = ok
@@ -1143,7 +1197,8 @@ def auto_extract_gcps(screenshot_path, world_polygon,
                 break
 
         if boundary_color is None and best is not None:
-            best_ok, _, _ = verify_registration(best[4], best[0], img.shape, world_polygon)
+            best_ok, _, _ = verify_registration(best[4], best[0], img.shape, world_polygon,
+                                                  gcps_pixel=best[3])
         return best, best_ok, attempts, tried_any_contour
 
     # Isolation quality is the outermost tier, above rotation and color:
@@ -1220,7 +1275,8 @@ def fit_year(prop, outdir, basename, screenshot_path, year, boundary_color=None)
         screenshot_path, prop.polygon, boundary_color=boundary_color)
 
     img = np.array(Image.open(screenshot_path).convert("RGB"))
-    ok, reasons, pixel_size = verify_registration(transform, rmse, img.shape, prop.polygon)
+    ok, reasons, pixel_size = verify_registration(transform, rmse, img.shape, prop.polygon,
+                                                    gcps_pixel=gcps_pixel)
 
     seeded = {"face": "label-isolated/face", "flood": "label-isolated/flood",
               "whole": "whole-mask"}.get(diag.get("label_seeded"), "whole-mask")
