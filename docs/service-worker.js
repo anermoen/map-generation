@@ -7,7 +7,7 @@
 // being hardcoded here, so nothing goes stale as properties/years are
 // added.
 
-const CACHE_NAME = "aerial-viewer-v3";
+const CACHE_NAME = "aerial-viewer-v4";
 
 // URLs that can change between visits - a new property, a new year, an
 // app update - and so must never be served from cache while there's a
@@ -89,9 +89,19 @@ self.addEventListener("activate", (event) => {
 // fall back to whatever's already cached if the network fetch fails.
 // matchOptions is passed through to both the fallback match and the
 // cache key, so a caller can e.g. ignore the search string.
+//
+// {cache: "no-store"} is doing real work here, not just being careful:
+// GitHub Pages sends "Cache-Control: max-age=600" on every file it
+// serves, including properties.json and service-worker.js itself
+// (confirmed directly with curl -I against the live site) - a plain
+// fetch() is still subject to the browser's own HTTP cache underneath
+// the Service Worker Cache API, so without this, "network-first" could
+// silently mean "whatever the browser's HTTP cache still has from the
+// last 10 minutes first" instead, quietly reintroducing the same
+// staleness this function exists to fix.
 async function networkFirst(request, matchOptions) {
     try {
-        const response = await fetch(request);
+        const response = await fetch(request, { cache: "no-store" });
         const cache = await caches.open(CACHE_NAME);
         cache.put(matchOptions ? request.url.split("?")[0] : request, response.clone());
         return response;
