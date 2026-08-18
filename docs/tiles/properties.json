@@ -1,6 +1,18 @@
 {
-  "14-987-Nittedal": "14/987",
-  "123-9-Etnedal": "123/9",
-  "124-9-Etnedal": "124/9",
-  "126-64-Etnedal": "126/64"
+  "14-987-Nittedal": {
+    "matrikkelnummer": "14/987",
+    "kommunenavn": "Nittedal"
+  },
+  "123-9-Etnedal": {
+    "matrikkelnummer": "123/9",
+    "kommunenavn": "Etnedal"
+  },
+  "124-9-Etnedal": {
+    "matrikkelnummer": "124/9",
+    "kommunenavn": "Etnedal"
+  },
+  "126-64-Etnedal": {
+    "matrikkelnummer": "126/64",
+    "kommunenavn": "Etnedal"
+  }
 }

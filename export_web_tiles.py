@@ -111,21 +111,25 @@ def main():
         json.dump(manifest, f, indent=2)
     print(f"Saved {manifest_path}")
 
-    _update_properties_registry(basename, prop.matrikkelnummer)
+    _update_properties_registry(basename, prop.matrikkelnummer, prop.kommunenavn)
 
 
-def _update_properties_registry(basename, matrikkelnummer):
+def _update_properties_registry(basename, matrikkelnummer, kommunenavn):
     """docs/tiles/properties.json - every property export_web_tiles.py
-    has ever exported, {code: matrikkelnummer}. The one thing the web
-    app can't discover on its own (a static site has no directory
-    listing) - this is what lets it offer a property switcher instead
-    of only ever showing whichever one is hardcoded as the default."""
+    has ever exported, {code: {matrikkelnummer, kommunenavn}}. The one
+    thing the web app can't discover on its own (a static site has no
+    directory listing) - this is what lets it offer a property switcher
+    instead of only ever showing whichever one is hardcoded as the
+    default. kommunenavn is included alongside matrikkelnummer (not just
+    the gnr/bnr) so the dropdown can show which kommune a gnr/bnr
+    belongs to - gnr/bnr alone isn't unique across kommuner, so this
+    matters as soon as there's more than one Etnedal-only bundle."""
     registry_path = os.path.join(WEB_ROOT, "tiles", "properties.json")
     registry = {}
     if os.path.isfile(registry_path):
         with open(registry_path) as f:
             registry = json.load(f)
-    registry[basename] = matrikkelnummer
+    registry[basename] = {"matrikkelnummer": matrikkelnummer, "kommunenavn": kommunenavn}
     with open(registry_path, "w") as f:
         json.dump(registry, f, indent=2)
     print(f"Saved {registry_path}")

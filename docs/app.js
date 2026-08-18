@@ -74,7 +74,10 @@ function setupPropertySelect(registry) {
     for (const code of codes) {
         const option = document.createElement("option");
         option.value = code;
-        option.textContent = registry[code];   // matrikkelnummer, e.g. "14/987"
+        // kommune before gnr/bnr, e.g. "Etnedal 123/9" - gnr/bnr alone
+        // isn't unique across kommuner, so leading with the kommune name
+        // is what actually disambiguates entries in the dropdown.
+        option.textContent = `${registry[code].kommunenavn} ${registry[code].matrikkelnummer}`;
         select.appendChild(option);
     }
     select.value = initialCode;
