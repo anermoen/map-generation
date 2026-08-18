@@ -22,14 +22,17 @@ viewer draws from), a screenshot the boundary is visible in already
 contains everything needed to work out pixel -> real-world coordinates:
 pick a handful of points where the boundary line has a recognizable
 kink/corner, match each to its known real-world (easting, northing), and
-fit a similarity transform (uniform scale + one rotation angle +
-translation - see fit_similarity()) relating pixel (col, row) to UTM
-(easting, northing) - the same idea as the "world file" technique used
-to georeference scanned paper maps for decades, applied here to a
-screenshot instead, but deliberately not the further-general 6-parameter
-affine that technique usually allows: see fit_similarity()'s own
-docstring for why shear/independent-axis-scaling has no physical
-meaning here and is excluded from the model entirely, not just
+fit a translation+scale transform (uniform scale + translation, rotation
+fixed at exactly zero - see fit_translation_scale()) relating pixel
+(col, row) to UTM (easting, northing) - the same idea as the "world
+file" technique used to georeference scanned paper maps for decades,
+applied here to a screenshot instead, but deliberately not the
+further-general 6-parameter affine that technique usually allows, and
+not even the similarity transform's extra rotation degree of freedom
+(fit_similarity(), available via --allow-rotation but off by default):
+see fit_translation_scale()'s own docstring for why neither
+shear/independent-axis-scaling nor rotation has any physical meaning
+here, and both are excluded from the default model entirely, not just
 discouraged.
 
 This is deliberately NOT as accurate as a real, properly-served GeoTIFF:
@@ -72,25 +75,24 @@ Workflow (three subcommands)
    just a convenience.)
 
 3. fit: pairs up vertex indices (from step 1) with pixel coordinates
-   (from step 2 or elsewhere), fits the similarity transform (see
-   fit_similarity()), reports the fit's residual error in meters, and
-   writes a tagged GeoTIFF plus a manifest.json entry in the same
-   format download_images.py produces.
+   (from step 2 or elsewhere), fits the translation+scale transform (see
+   fit_translation_scale()) by default, reports the fit's residual error
+   in meters, and writes a tagged GeoTIFF plus a manifest.json entry in
+   the same format download_images.py produces.
 
        python3 georeference_screenshot.py fit \\
            --kommune Etnedal --gnr 123 --bnr 9 \\
            --screenshot photo_2016.png --year 2016 \\
            --gcp 4:512:300 --gcp 11:800:120 --gcp 27:200:900 --gcp 61:50:400
 
-   (--gcp VERTEX_INDEX:PIXEL_X:PIXEL_Y, repeatable. The code requires at
-   least 3, a practical safety margin above the true minimum - a
-   similarity transform only has 4 unknowns, so 2 well-separated points
-   are actually enough to solve it exactly. That's also why, unlike the
-   general 6-parameter affine this project used to fit, even exactly 3
-   GCPs now gives a real, meaningful residual error rather than an
-   always-zero one - every point beyond the 2 truly needed adds genuine
-   redundancy to check against. Still, use 4+, spread around the
-   property and not collinear, for a better-constrained fit.)
+   (--gcp VERTEX_INDEX:PIXEL_X:PIXEL_Y, repeatable. fit_translation_scale()
+   has 3 unknowns and needs at least 2 GCPs; pass --allow-rotation to use
+   fit_similarity() instead (4 unknowns, needs at least 3) for the rare
+   screenshot the zero-rotation fit genuinely can't resolve - see that
+   flag's own help text for why it's opt-in, not the default. Either
+   way, use 4+ GCPs, spread around the property and not collinear, for a
+   better-constrained fit and a real redundancy check, not just the
+   minimum the model needs to solve at all.)
 
 Requires the same dependencies as download_images.py, plus matplotlib
 (list-vertices, pick).
@@ -364,16 +366,41 @@ def cmd_fit(args):
         gcps_world.append(coords[idx])
         gcps_pixel.append((px, py))
 
-    transform, rmse, max_err, errors = fit_similarity(gcps_world, gcps_pixel)
+    # Zero rotation is the default here for the same reason it is in
+    # auto_gcp.py: norgeibilder.no's viewer has no rotation control, so a
+    # real capture is always exactly north-up, and fit_similarity()'s
+    # extra rotation degree of freedom - left as this command's only
+    # option until now - has no way to distinguish a genuine tilt (there
+    # isn't one) from GCP correspondence/clicking noise being absorbed
+    # into a plausible-looking but wrong small rotation. Confirmed this
+    # wasn't just a theoretical risk: fitting 124/9 Etnedal's 2016 by
+    # hand with this same command, 3 confidently-identified GCPs, found
+    # a -4.8 degree "fit" before this default was changed - one of the
+    # exact screenshots fit_translation_scale()'s own docstring already
+    # cites as a real case of this failure mode, hit again here because
+    # this command hadn't caught up to that lesson yet. --allow-rotation
+    # opts back into fit_similarity() for the rare case a screenshot
+    # genuinely can't be fit without it (verify by comparing the result
+    # against plot_overlay.py's output either way, not by trusting a low
+    # RMSE - see README.md).
+    fit_fn = fit_similarity if args.allow_rotation else fit_translation_scale
+    transform, rmse, max_err, errors = fit_fn(gcps_world, gcps_pixel)
 
-    print(f"Fitted affine transform from {len(args.gcp)} GCPs:")
+    print(f"Fitted affine transform from {len(args.gcp)} GCPs "
+          f"({'rotation allowed' if args.allow_rotation else 'zero rotation (default)'}):")
     for (idx, px, py), err in zip(args.gcp, errors):
         print(f"  vertex {idx:3d}  pixel=({px:7.1f},{py:7.1f})  residual error = {err:6.2f} m")
     print(f"\nRMSE = {rmse:.2f} m   max error = {max_err:.2f} m")
-    if len(args.gcp) == 3:
-        print("(exactly 3 GCPs: the fit is mathematically exact through all three, so "
-              "this RMSE is ~0 BY CONSTRUCTION - not a real accuracy estimate. Use 4+ "
-              "GCPs, well spread around the property, for a meaningful error check.)")
+    # fit_similarity has 4 unknowns, exactly determined (RMSE ~0 by
+    # construction, not a real accuracy estimate) at exactly 2 GCPs - not
+    # 3, despite what this message used to claim; fit_translation_scale's
+    # 3 unknowns have no such vacuously-exact point count, so every RMSE
+    # it reports, even from just 2 GCPs, is already a real residual.
+    if args.allow_rotation and len(args.gcp) == 2:
+        print("(exactly 2 GCPs with --allow-rotation: the fit is mathematically exact "
+              "through both, so this RMSE is ~0 BY CONSTRUCTION - not a real accuracy "
+              "estimate. Use 4+ GCPs, well spread around the property, for a meaningful "
+              "error check.)")
 
     pixel_size_x = float(np.hypot(transform.a, transform.d))
     pixel_size_y = float(np.hypot(transform.b, transform.e))
@@ -403,7 +430,8 @@ def cmd_fit(args):
             KOMMUNENUMMER=prop.kommunenummer,
             YEAR=str(args.year),
             SOURCE="norgeibilder.no browser viewer (manual screenshot)",
-            GEOREFERENCING_METHOD=f"manual GCP affine fit, {len(args.gcp)} points",
+            GEOREFERENCING_METHOD=f"manual GCP {'similarity' if args.allow_rotation else 'translation+scale'} "
+                                   f"fit, {len(args.gcp)} points",
             RMSE_M=f"{rmse:.2f}",
             MAX_ERROR_M=f"{max_err:.2f}",
             PIXEL_SIZE_M=f"{pixel_size_x:.3f}x{pixel_size_y:.3f}",
@@ -467,7 +495,19 @@ def main():
     p3.add_argument("--year", type=int, required=True)
     p3.add_argument("--gcp", action="append", type=parse_gcp, required=True,
                      help="VERTEX_INDEX:PIXEL_X:PIXEL_Y - repeat for each GCP "
-                          "(>=3, ideally 4+, spread around the property)")
+                          "(>=2 for the default zero-rotation fit, >=3 with "
+                          "--allow-rotation; ideally 4+ either way, spread around "
+                          "the property)")
+    p3.add_argument("--allow-rotation", action="store_true",
+                     help="fit a similarity transform (uniform scale + rotation + "
+                          "translation) instead of the default translation+scale-only "
+                          "fit. Off by default on purpose: norgeibilder.no's viewer has "
+                          "no rotation control, so a real capture is always north-up, "
+                          "and leaving rotation free lets it silently absorb GCP "
+                          "correspondence noise into a plausible-looking but wrong small "
+                          "rotation (see auto_gcp.py's README section) - only pass this "
+                          "if the zero-rotation fit genuinely can't be made to line up "
+                          "against plot_overlay.py's output.")
     p3.add_argument("--outdir", default=None,
                      help="default: a folder named after the property itself, "
                           "'<gnr>-<bnr>-<kommune>' (e.g. 123-9-Etnedal)")

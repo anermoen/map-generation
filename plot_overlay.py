@@ -45,6 +45,7 @@ Output: <image_basename>_overlay.png next to each input image by default.
 """
 
 import argparse
+import csv
 import glob
 import json
 import os
@@ -54,12 +55,44 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.transforms import Affine2D
+import numpy as np
 import rasterio
 from rasterio.plot import reshape_as_image
 
 from property import fetch_property, property_code
 
 BOUNDARY_COLOR = "#e63946"
+
+
+def _lookup_photo_date(outdir, year):
+    """Best-effort photo capture date for a given year, read from
+    imagery_coverage.csv (written by imagery_search.py's own live-API
+    search, cached to disk once per property) - a local file read, not
+    a fresh call to Norge i Bilder's project-metadata API, which has
+    proven flaky enough elsewhere in this project (see README.md) that
+    calling it again just to label an overlay title isn't worth the
+    risk. Prefers a row with distance_m == 0 (the project's real flown
+    coverage actually contains the property, not just an overlapping
+    bounding box - see imagery_search.py's own docstring); falls back to
+    any matching year if no exact-coverage row exists. Returns None
+    (title just omits the date) if the CSV is missing, stale, or has no
+    row for this year - this is a label, not something to fail over."""
+    csv_path = os.path.join(outdir, "imagery_coverage.csv")
+    if not os.path.isfile(csv_path):
+        return None
+    try:
+        with open(csv_path, newline="") as f:
+            reader = csv.DictReader(row for row in f if not row.startswith("#"))
+            fallback = None
+            for row in reader:
+                if int(row["year"]) != year:
+                    continue
+                if float(row["distance_m"]) == 0.0:
+                    return row["photo_date"]
+                fallback = fallback or row["photo_date"]
+            return fallback
+    except (OSError, ValueError, KeyError):
+        return None
 
 
 def resolve_image_path(args, outdir, basename):
@@ -103,6 +136,7 @@ def plot_overlay(image_path, prop, out_path, title=None):
         img = reshape_as_image(ds.read())
         t = ds.transform
         width_px, height_px = ds.width, ds.height
+        tags = ds.tags()
 
     fig, ax = plt.subplots(figsize=(10, 10))
     im = ax.imshow(img, origin="upper", zorder=1)
@@ -140,7 +174,21 @@ def plot_overlay(image_path, prop, out_path, title=None):
     ax.set_xlabel("Easting (m, EPSG:25833)")
     ax.set_ylabel("Northing (m, EPSG:25833)")
     ax.legend(loc="upper right", fontsize=9)
-    ax.set_title(title or f"{prop.matrikkelnummer}, {prop.kommunenavn}", fontsize=11)
+    if title is None:
+        # Pixel size computed from the transform itself (hypot of both
+        # basis vectors, same formula used throughout auto_gcp.py/
+        # georeference_screenshot.py), not parsed back out of the
+        # PIXEL_SIZE_M tag - the two pipelines write that tag in
+        # different formats ("0.165" vs "0.165x0.165") and the transform
+        # is the actual source of truth either way.
+        pixel_size = (np.hypot(t.a, t.d) + np.hypot(t.b, t.e)) / 2
+        year_str = tags.get("YEAR")
+        subtitle = f"pixel size {pixel_size:.3f} m/px"
+        if year_str:
+            photo_date = _lookup_photo_date(os.path.dirname(image_path) or ".", int(year_str))
+            subtitle = f"{year_str}" + (f" ({photo_date})" if photo_date else "") + f" · {subtitle}"
+        title = f"{prop.matrikkelnummer}, {prop.kommunenavn}\n{subtitle}"
+    ax.set_title(title, fontsize=11)
     ax.grid(alpha=0.25, zorder=0)
     fig.tight_layout()
     fig.savefig(out_path, dpi=150)

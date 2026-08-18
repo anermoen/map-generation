@@ -32,23 +32,25 @@ norgeibilder.no screenshot" below). **Start with `auto_gcp.py`** - it
 does this fully automatically, batching through every screenshot in a
 property's folder with no human clicking corners; `georeference_screenshot.py`
 is the manual fallback for whichever specific years it can't confidently
-fit on its own. **Working end to end, for real**: 42 of the 43
+fit on its own. **Working end to end, for real**: all 43
 manually-captured screenshots on hand across four real properties -
 123/9 Etnedal (8), 14/987 Nittedal (14), 124/9 Etnedal (8), and 126/64
 Etnedal (13) - are georeferenced correctly, visually confirmed against
 the live boundary for every single one via `plot_overlay.py` (see
 `auto_gcp.py`'s documented failure modes/fixes below, especially fixes
-5, 7, and 8, for how that went from "most of them" to "nearly all of
-them"). 39 of those 42 got there via `auto_gcp.py` alone; 3 (all in
+5, 7, and 8, for how that went from "most of them" to all of them).
+39 of those 43 got there via `auto_gcp.py` alone; 4 needed
+`georeference_screenshot.py`'s manual fallback instead - 3 (all in
 123/9 Etnedal - 1958, 1991, 2011) passed every one of `auto_gcp.py`'s
 automatic checks while still being wrong, caught only by actually
-looking at the overlay, and needed `georeference_screenshot.py`'s
-manual fallback instead - see the "Passing every check... still isn't
+looking at the overlay (see the "Passing every check... still isn't
 proof" paragraph below fix 8 for why that distinction matters and won't
-be going away. The one remaining exception, 124/9 Etnedal's 2016, is a
-genuinely under-constrained screenshot (too few reliable, well-spread
-real corners visible in frame) that's queued for the manual fallback
-next. `plot_overlay.py`'s batch mode (see "Per-property output folder"
+be going away); the fourth (124/9 Etnedal's 2016) was a genuinely
+under-constrained screenshot (too few reliable, well-spread real
+corners visible in frame) `auto_gcp.py` correctly never claimed to fit
+at all. Fitting that last one manually also surfaced a real bug in the
+manual tool itself, now fixed - see `georeference_screenshot.py`'s own
+section below. `plot_overlay.py`'s batch mode (see "Per-property output folder"
 below) regenerates every overlay in one command.
 
 ## Full workflow, step by step
@@ -126,6 +128,16 @@ Replace `Etnedal 123 9` with your own kommune/gnr/bnr throughout.
    numerically plausible (a low RMSE alone isn't sufficient evidence -
    see `auto_gcp.py`'s documented failure modes below for real cases
    where it wasn't). Look at these before trusting step 4's output.
+   Each overlay's title states the year, the source photo's capture
+   date (looked up from that property's own `imagery_coverage.csv`,
+   written by `imagery_search.py` - a local file read, not a fresh call
+   to the same API that's proven flaky elsewhere in this project, so a
+   missing/stale CSV just omits the date rather than failing) and the
+   fitted pixel size, computed directly from the transform - both are
+   useful cross-checks in their own right, not just labels: an outlier
+   pixel size relative to a property's other years, or an implausible
+   date, is often the first hint of a wrong fit (see 123/9 Etnedal's
+   1958/2011 above, both caught in part this way).
 
 6. **Build the Word report.**
 
@@ -693,8 +705,9 @@ fits "succeeded" by every check above and were still visibly wrong:
    well-spread real corners captured in frame), not a bug to keep
    chasing with ever-narrower heuristics - excluded from their
    properties' current output (via `auto_gcp.py --years`, rather than
-   left in with a silently wrong result) and queued for
-   `georeference_screenshot.py`'s manual fallback below.
+   left in with a silently wrong result) and, at the time, queued for
+   `georeference_screenshot.py`'s manual fallback below (both are now
+   fixed through it - see that section).
 
 **Passing every check in fix 8 still isn't proof of a correct fit -
 confirmed again, immediately, on the very same property.** Two more of
@@ -720,14 +733,17 @@ ones `auto_gcp.py` accepted.
 looking at every overlay, not by trusting a passing check**: 39 of 43
 screenshots across 123/9 Etnedal (8), 14/987 Nittedal (14), 124/9
 Etnedal (8), and 126/64 Etnedal (13) fit correctly via `auto_gcp.py`
-alone; 3 more (123/9 Etnedal's 1958, 1991, and 2011) needed
-`georeference_screenshot.py`'s manual fallback after passing every
-automatic check while still being wrong (see above) - all 8 of 123/9
-Etnedal's screenshots are now confirmed correct, by one route or the
-other. The remaining one, 124/9 Etnedal's 2016, is still queued for the
-manual fallback below (see fix 8's own paragraph for why automatic
-fitting genuinely can't resolve it). This isn't the first time the
-"automatic" count has moved in both directions: `georeference_screenshot.py`'s
+alone; the remaining 4 needed `georeference_screenshot.py`'s manual
+fallback - 3 (123/9 Etnedal's 1958, 1991, and 2011) after passing every
+automatic check while still being wrong (see above), and 1 (124/9
+Etnedal's 2016) because `auto_gcp.py` genuinely couldn't fit it at all.
+All 43 are now confirmed correct, by one route or the other - see the
+manual-fallback section below for how 2016 in particular was fit, which
+also surfaced a real, separate bug in the manual tool itself (it had
+been defaulting to a free-rotation fit this whole time, the same
+escape hatch fix 6 deliberately closed for `auto_gcp.py`, just never
+closed here - now fixed too). This isn't the first time the "automatic"
+count has moved in both directions: `georeference_screenshot.py`'s
 manual fallback put in genuine work fitting 124/9 Etnedal's 1986/1991
 and 126/64 Etnedal's 1986/1991/2001/2011 by hand at one point (see the
 manual-fallback section's own worked example) - fix 5 above is what
@@ -752,22 +768,40 @@ right.
 ### Manual fallback (`georeference_screenshot.py`)
 
 Needed two different ways: (a) a year `auto_gcp.py` couldn't confidently
-fit at all - currently just 124/9 Etnedal's 2016, still queued as of
-this writing; and (b) a year `auto_gcp.py` *did* confidently fit, every
-automatic check passing, while still being wrong - 123/9 Etnedal's
-1958, 1991, and 2011, all three found only by looking at the overlay
-image, not by any check (see fix 8's "Passing every check... still
-isn't proof" paragraph above), and all three now fixed through this
-fallback. Real, worked sessions in both categories, not hypotheticals -
-see this section's own worked example just below for the method (predict
-a distant vertex's pixel position from one confident corner + the
-property's own known pixel scale, then verify against the actual
-screenshot before trusting it, rather than guessing corners blind).
-Also worth knowing: 124/9 Etnedal's 1986/1991 and 126/64 Etnedal's
-1986/1991/2001/2011 were earlier, genuine uses of this fallback too
-(before fix 5 made even those fit automatically on a later re-run) - a
-low-quality or unusually-cropped screenshot could land here for any
-property, not just the ones named above.
+fit at all - 124/9 Etnedal's 2016; and (b) a year `auto_gcp.py` *did*
+confidently fit, every automatic check passing, while still being wrong
+- 123/9 Etnedal's 1958, 1991, and 2011, all three found only by looking
+at the overlay image, not by any check (see fix 8's "Passing every
+check... still isn't proof" paragraph above). All four now fixed
+through this fallback. Real, worked sessions in both categories, not
+hypotheticals - see this section's own worked example just below for
+the method (predict a distant vertex's pixel position from one
+confident corner + the property's own known pixel scale, then verify
+against the actual screenshot before trusting it, rather than guessing
+corners blind). Also worth knowing: 124/9 Etnedal's 1986/1991 and
+126/64 Etnedal's 1986/1991/2001/2011 were earlier, genuine uses of this
+fallback too (before fix 5 made even those fit automatically on a later
+re-run) - a low-quality or unusually-cropped screenshot could land here
+for any property, not just the ones named above.
+
+**Fitting 124/9 Etnedal's 2016 surfaced a real bug in this tool itself,
+not just a hard screenshot.** `cmd_fit` had always called
+`fit_similarity()` unconditionally - the same free-rotation model
+`auto_gcp.py` deliberately stopped defaulting to (fix 6 above), for the
+same reason: norgeibilder.no's viewer has no rotation control, so
+rotation left free has no way to distinguish a genuine tilt (there
+isn't one) from GCP-picking noise being absorbed into a plausible but
+wrong small rotation. Hit directly, not hypothetically: fitting 2016
+by hand with 3 confidently-identified GCPs found a -4.8 degree "fit"
+before this was changed. Fixed by making `fit_translation_scale()`
+(zero rotation) the default here too, matching `auto_gcp.py`; the old
+behavior is still available via `--allow-rotation` for a screenshot
+that genuinely needs it. A second, smaller bug fixed alongside it: the
+tool's own printed message claimed an exactly-3-GCP fit was "exact by
+construction" (RMSE ~0) - true of `fit_similarity()`'s 4 unknowns at
+exactly *2* GCPs, not 3 (this file already said as much further down,
+correctly, before this section's own inline message contradicted it);
+now only prints, correctly, at 2 GCPs with `--allow-rotation`.
 Deliberately approximate, not a substitute for a real WMS download -
 accuracy is limited by screenshot resolution (whatever zoom level the
 browser was at, not the source photo's native resolution) and how
@@ -801,25 +835,36 @@ Workflow (subcommand first - see the CLI-shape callout above):
     # -> fits the transform, reports RMSE, writes a tagged GeoTIFF +
     #    manifest.json entry in the same format download_images.py uses
 
-Needs at least 3 GCPs - a practical safety margin, not the true minimum:
-`fit_similarity()`'s constrained model (see `auto_gcp.py`'s fix 5 above)
-has only 4 unknowns, so 2 well-separated points are actually enough to
-solve it exactly. That also means, unlike the general 6-parameter affine
-this project used to fit, even exactly 3 GCPs now gives a real,
-meaningful RMSE rather than an always-~0 one. Still, use 4+, well spread
-around the property and not collinear, for a better-constrained fit.
+Needs at least 2 GCPs for the default zero-rotation fit
+(`fit_translation_scale()`, 3 unknowns - see `auto_gcp.py`'s fix 6
+above for why zero rotation is the right default, not an
+approximation), or 3 with `--allow-rotation` (`fit_similarity()`, 4
+unknowns - 2 well-separated points are actually enough to solve that
+one exactly, so 3 already gives a real, meaningful RMSE rather than an
+always-~0 one - unlike the general 6-parameter affine this project used
+to fit once). Still, use 4+ either way, well spread around the property
+and not collinear, for a better-constrained fit and a genuine
+redundancy check.
 
-**Verified two ways**: first end-to-end with a synthetic test screenshot
-(the property boundary rendered at a known 0.5 m/pixel, 2-degree-rotated
-transform, fed back through `list-vertices` + `fit`) - recovered the
-exact known transform to numerical precision (RMSE ~1e-5 m), confirming
-the affine-fit math and the GeoTIFF/manifest writing both work
-correctly. Then for real: a real 2025 screenshot fit with 5 GCPs
-identified by the predict-and-verify method above gave RMSE = 3.75 m
-(max error 6.65 m) on a ~1.3 m/pixel image - about 3 pixels of error -
-and `plot_overlay.py`'s output (boundary fetched fresh from the live
-WFS, overlaid on the real photo) lines up almost exactly with the
-boundary already drawn into the photo by norgeibilder.no itself.
+**Verified three ways**: first end-to-end with a synthetic test
+screenshot (the property boundary rendered at a known 0.5 m/pixel,
+2-degree-rotated transform, fed back through `list-vertices` + `fit
+--allow-rotation`) - recovered the exact known transform to numerical
+precision (RMSE ~1e-5 m), confirming the affine-fit math and the
+GeoTIFF/manifest writing both work correctly. Then for real, twice:
+a real 2025 screenshot (123/9 Etnedal) fit with 5 GCPs identified by
+the predict-and-verify method above gave RMSE = 3.75 m (max error
+6.65 m) on a ~1.3 m/pixel image - about 3 pixels of error - and
+`plot_overlay.py`'s output (boundary fetched fresh from the live WFS,
+overlaid on the real photo) lines up almost exactly with the boundary
+already drawn into the photo by norgeibilder.no itself. And, after
+this section's own `--allow-rotation` default fix (see above): 124/9
+Etnedal's 2016, fit with 4 GCPs found via the same predict-and-verify
+method, gave RMSE = 0.07 m at 0.165 m/pixel - matching every other year
+of the same property almost exactly - once the correspondence was
+right (an early, wrong guess at one corner, 3 GCPs, gave RMSE 4.4-7.6 m
+and a visibly-drifting overlay before the predict-and-verify check
+caught it).
 
 ## Per-property output folder
 
