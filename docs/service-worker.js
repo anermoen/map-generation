@@ -7,7 +7,16 @@
 // being hardcoded here, so nothing goes stale as properties/years are
 // added.
 
-const CACHE_NAME = "aerial-viewer-v4";
+const CACHE_NAME = "aerial-viewer-v5";
+// Bumped automatically by run_all.py's push_to_github()/bump_cache_version()
+// on every push that actually has something new to deploy - do not bump
+// by hand and expect it to stick, and do not rely on editing this file
+// directly to invalidate caches. Necessary, not just tidy: this string
+// changing is the *only* thing that makes an already-installed browser
+// notice service-worker.js is byte-different, install the new version,
+// and (via the activate handler below) throw away the old cache and
+// re-fetch everything - see the tile-images paragraph just below for
+// why that matters even for a URL that never changes.
 
 // URLs that can change between visits - a new property, a new year, an
 // app update - and so must never be served from cache while there's a
@@ -20,9 +29,16 @@ const CACHE_NAME = "aerial-viewer-v4";
 // visitor to revisit with a network connection *and* happen to get a
 // byte-different service-worker.js at the same time. Tile images
 // aren't in this list on purpose: a given year's tile at a given
-// z/x/y is genuinely immutable once generated, so those stay
+// z/x/y is *usually* immutable once generated, so those stay
 // cache-first for efficiency - no reason to re-fetch hundreds of
-// unchanged tiles on every visit.
+// unchanged tiles on every visit. "Usually" is doing real work in that
+// sentence, though: confirmed directly that re-fitting an
+// *already-published* year with corrected GCPs changes a tile's pixel
+// content at that exact same URL (126/64 Etnedal's 2016 tile at
+// z17/x69082/y37438 changed across 4 separate commits in one day) -
+// isVolatile() has no way to catch that (the URL never changes), which
+// is exactly why CACHE_NAME must be bumped on every push instead, not
+// just ones that happen to add something new.
 function isVolatile(url) {
     return url.endsWith("/properties.json") || url.endsWith("/manifest.json") ||
         url.endsWith("/app.js") || url.endsWith("/style.css");

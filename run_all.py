@@ -32,6 +32,7 @@ Usage
 
 import argparse
 import os
+import re
 import subprocess
 import sys
 
@@ -39,6 +40,7 @@ from property import fetch_property
 from plot_overlay import find_input_screenshots
 
 PYTHON = sys.executable
+SERVICE_WORKER_PATH = os.path.join("docs", "service-worker.js")
 
 
 def run_step(description, script_args):
@@ -48,6 +50,40 @@ def run_step(description, script_args):
         raise SystemExit(f"\n{description} failed (exit code {result.returncode}) - stopping.")
 
 
+def bump_cache_version():
+    """Bump service-worker.js's CACHE_NAME - the forcing function that
+    makes a browser which already has this app installed actually
+    notice new content exists. Confirmed necessary the hard way, not
+    just in theory: service-worker.js's own isVolatile() list (this
+    project's earlier caching fix) covers a *new* property/year showing
+    up, but tile images are deliberately cache-first-forever on the
+    assumption a given year's tile at a given z/x/y is immutable once
+    generated - true when a year is only ever added, false the moment
+    an *already-published* year gets re-fit with corrected GCPs (real
+    case: 126/64 Etnedal's 2016 tile at z17/x69082/y37438 changed pixel
+    content across 4 separate commits today while CACHE_NAME sat at v4
+    the whole time - anyone who'd visited in between was stuck serving
+    stale, wrong tiles indefinitely, with nothing to ever make them
+    stop). Bumping CACHE_NAME on every real push - not just ones that
+    happen to touch an already-published year - is deliberately blunt
+    rather than trying to detect which case this is: a stale byte-for-
+    byte-identical service-worker.js is the one thing that can never
+    trigger a browser to even check for an update, so every push must
+    change it, and re-downloading everything once per deploy is a cheap
+    price for a field tool that isn't updated more than occasionally."""
+    with open(SERVICE_WORKER_PATH) as f:
+        content = f.read()
+    match = re.search(r'CACHE_NAME = "aerial-viewer-v(\d+)"', content)
+    if not match:
+        raise SystemExit(f"Could not find CACHE_NAME in {SERVICE_WORKER_PATH} to bump - "
+                          f"fix manually before pushing (see run_all.py's push_to_github).")
+    new_version = int(match.group(1)) + 1
+    new_content = content[:match.start(1)] + str(new_version) + content[match.end(1):]
+    with open(SERVICE_WORKER_PATH, "w") as f:
+        f.write(new_content)
+    print(f"Bumped {SERVICE_WORKER_PATH} to CACHE_NAME v{new_version}")
+
+
 def push_to_github(commit_message):
     print("\n=== Pushing to GitHub ===", flush=True)
     subprocess.run(["git", "add", "docs", "run_all.py"], check=True)
@@ -55,6 +91,13 @@ def push_to_github(commit_message):
     if status.returncode == 0:
         print("Nothing new to commit (docs/ already up to date) - skipping push.")
         return
+    # Only bump once real content is actually about to be pushed - not
+    # on every invocation regardless of whether anything changed, which
+    # would turn a harmless no-op run into a pointless commit every
+    # time. See bump_cache_version()'s own docstring for why this step
+    # can't be skipped once there *is* something new to deploy.
+    bump_cache_version()
+    subprocess.run(["git", "add", "docs"], check=True)
     subprocess.run(["git", "commit", "-m", commit_message], check=True)
     subprocess.run(["git", "push", "origin", "main"], check=True)
 
