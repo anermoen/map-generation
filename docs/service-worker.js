@@ -7,7 +7,7 @@
 // being hardcoded here, so nothing goes stale as properties/years are
 // added.
 
-const CACHE_NAME = "aerial-viewer-v5";
+const CACHE_NAME = "aerial-viewer-v6";
 // Bumped automatically by run_all.py's push_to_github()/bump_cache_version()
 // on every push that actually has something new to deploy - do not bump
 // by hand and expect it to stick, and do not rely on editing this file
