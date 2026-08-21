@@ -53,6 +53,14 @@ manual tool itself, now fixed - see `georeference_screenshot.py`'s own
 section below. `plot_overlay.py`'s batch mode (see "Per-property output folder"
 below) regenerates every overlay in one command.
 
+**A fifth property, 151/39 Etnedal, needed a different fallback
+entirely**: `auto_gcp.py` fit 12 of its 13 years confidently *and
+wrong* (not just one outlier, and not just unfittable), only caught by
+looking at the overlays - see "When `auto_gcp.py` is confidently wrong"
+below for the full case and the `refit_from_reference.py` tool it led
+to. All 14 of its years (1958-2025, after a 2013 screenshot added
+later) are now correctly georeferenced and live.
+
 ## Full workflow, step by step
 
 Every step below is its own script, run manually, one at a time -
@@ -117,7 +125,12 @@ Replace `Etnedal 123 9` with your own kommune/gnr/bnr throughout.
    its real failure modes/fixes to date). Prints which years it
    couldn't - fall back to `georeference_screenshot.py`'s manual
    `list-vertices`/`pick`/`fit` workflow (below) for those specifically,
-   not the whole batch.
+   not the whole batch. If instead most/all years fit *confidently but
+   wrong* (every check passes, the RMSE looks fine, but the overlay is
+   visibly off against the live boundary) - a real, whole-property case,
+   not a hypothetical, see "When `auto_gcp.py` is confidently wrong"
+   below - `refit_from_reference.py` is the fallback, not more manual
+   picking.
 
 5. **Render overlays for visual review.**
 
@@ -866,6 +879,134 @@ right (an early, wrong guess at one corner, 3 GCPs, gave RMSE 4.4-7.6 m
 and a visibly-drifting overlay before the predict-and-verify check
 caught it).
 
+### When `auto_gcp.py` is confidently wrong, not just unconfident (`refit_from_reference.py`)
+
+A third failure mode, distinct from both `georeference_screenshot.py`
+cases above (a year `auto_gcp.py` can't fit at all, or one wrong year
+that still passed every check): **`auto_gcp.py`'s boundary-color/ICP
+approach fitting *most or all* of a property's years confidently and
+wrong**, not just one. Real, not hypothetical - hit on 151/39 Etnedal
+(2026-08-20): 12 of its 13 years fit with RMSE 2.3-4.5m against a pixel
+size of ~0.04-0.06m/px (i.e. 40-100 pixels of error), passing
+`verify_registration()` only because its RMSE check has a permissive
+flat 5m floor (needed elsewhere for legitimately coarse screenshots -
+see fix 8 above) - not because the fit was actually good. Only 2023 fit
+well (RMSE 0.06m). Visually confirmed via `plot_overlay.py`: the red
+live-WFS boundary sat rotated/shifted off the actual house in every
+other year. This is the same "self-consistent but wrong ICP
+convergence" failure mode `auto_gcp.py`'s own module docstring already
+documents (point 5) - here it happened to hit nearly the whole property
+at once, most likely aliasing against a similarly-shaped neighboring
+parcel on the tightly-cropped screenshots, rather than just one outlier
+year. Re-picking GCPs by hand for 12 years would work but is exactly
+the tedious, error-prone process `auto_gcp.py` exists to avoid in the
+first place.
+
+**The fix doesn't re-run `auto_gcp.py`'s boundary-color contour search
+at all** - it sidesteps it entirely. Every screenshot of a property
+shows the same physical ground (buildings, driveways, roads) regardless
+of year, so if even *one* year's registration is independently
+trustworthy (confirmed by actually looking at its overlay, per fix 8's
+lesson - not just because it happened to pass), SIFT keypoints matched
+between it and another year's raw screenshot become ground control
+points for that other year: convert each matched *reference-image*
+keypoint to world coordinates via the reference's own known-good
+transform, `cv2.estimateAffinePartial2D` + RANSAC against the *target*
+image's matching pixels for outlier rejection, then re-fit properly from
+the inliers with the same `fit_translation_scale`/`fit_similarity` this
+project always uses, and run `auto_gcp.py`'s own `verify_registration()`
+before trusting it. A completely different correspondence source than
+the boundary-color contour, so it isn't subject to the same failure
+mode - and typically finds far more, better-spread GCPs (10-30 RANSAC
+inliers, vs. the 4-6 boundary corners `auto_gcp.py` has to work with).
+
+**Bootstraps across multiple references, not just the one seed.** A
+decades-old or differently-graded screenshot can share too little visual
+texture with a single distant reference (color 2023 vs. grayscale 1958)
+for SIFT to find enough confident matches, even though the same year
+would match fine against a photometrically closer one. So every
+already-fit year - the seed `--reference-year`(s) plus every year the
+script itself successfully re-fits - joins a growing pool: each
+still-unfit year tries every current reference, closest-year-first, and
+any pass joins the pool too, repeated until a full pass makes no further
+progress. On 151/39 Etnedal, seeded from 2023 alone, this cascaded
+outward through 11 of the remaining 12 years in one run (2023 -> 2022 ->
+2024 -> 2025 -> 2016/2008/2006 -> 1986 -> 1975 -> 1971/1958 -> 2011),
+each hop matching a photometrically closer neighbor instead of always
+jumping the full gap back to 2023 - RMSE dropped from 2.3-4.5m to mostly
+under 0.5m, several under 0.05m. Only one year (2017) never matched any
+reference in the pool - SIFT kept converging on a self-consistent but
+~165-degree-rotated wrong correspondence (likely repetitive tree-canopy/
+driveway texture) against every candidate, not a property of the
+screenshot itself (it looks like every other year's, visually). For a
+simple, unambiguous property shape like 151/39's 4-corner boundary, that
+last case is still faster to fix by extracting the boundary-color
+contour's corner pixels with `auto_gcp.py`'s own `detect_boundary_colors`/
+`extract_target_face_contour` helpers and pairing them to vertex indices
+by cardinal pixel position (topmost pixel = northmost vertex, etc. - a
+north-up screenshot makes this unambiguous) than by
+`georeference_screenshot.py`'s interactive `pick` step - see this
+project's own session history for the worked one-off script; not (yet)
+promoted into a reusable command here since it only applies cleanly to a
+simple, low-vertex-count boundary.
+
+**A real regression, worth knowing before touching the matching
+thresholds**: loosening the SIFT ratio-test threshold (0.85 -> 0.92) to
+try to rescue the harder years let in enough spurious matches that
+RANSAC couldn't find the correct model at all - and silently broke 4
+years that had been fitting correctly moments before, not just failed to
+fix the hard ones. Caught only because a fast `--dry-run` over *every*
+year was re-checked before trusting the looser setting, not just the
+previously-failing subset. Reverted to 0.85/`MIN_INLIERS=8`, the values
+this section's numbers above reflect. Treat any threshold change here as
+a regression risk against the whole already-working set, not just a
+forward fix for whichever year prompted it - especially before `--push`.
+
+Usage - same `--kommune`/`--gnr`/`--bnr` shape as everything else, plus:
+
+    python3 refit_from_reference.py --kommune Etnedal --gnr 151 --bnr 39 \
+        --reference-year 2023
+    # -> every other raw screenshot found, matched against 2023 (growing
+    #    to include every year this run itself re-fits); overwrites the
+    #    .tif and manifest.json entry for any year whose new fit passes
+    #    verify_registration
+
+    python3 refit_from_reference.py --kommune Etnedal --gnr 151 --bnr 39 \
+        --reference-year 2023 --years 2016 2022 --dry-run
+    # -> just these years, print the result without writing anything -
+    #    always do this first before a real run
+
+    python3 refit_from_reference.py --kommune Etnedal --gnr 151 --bnr 39 \
+        --reference-year 2023 --push
+    # -> re-fit, then regenerate every downstream artifact (overlay/
+    #    report/mbtiles/web tiles - the same steps run_all.py chains,
+    #    run via the property's full year set since those tools don't
+    #    take --years) and push docs/ to GitHub - same opt-in-only
+    #    behavior as run_all.py --push, skipped if nothing was re-fit
+
+**Adding one new year later to a property already fixed this way**:
+once a property has several confirmed-good years, seed from all of them
+so the new year matches whichever is temporally closest automatically,
+rather than reaching for plain `auto_gcp.py`/`run_all.py` (which would
+route the new year through the same boundary-color contour search that
+mis-fit the property in the first place):
+
+    python3 refit_from_reference.py --kommune Etnedal --gnr 151 --bnr 39 \
+        --reference-year 1958 1971 1975 1986 2006 2008 2011 2016 2017 2022 2023 2024 2025 \
+        --years 2013 --dry-run
+    # -> tries 2013 against every listed reference, closest year first;
+    #    drop --dry-run once the printed RMSE and the regenerated overlay
+    #    both look right, then --push
+
+Verified for real, twice more after the initial 11-year cascade: 2017
+(the one year the cascade couldn't reach - fixed via the corner-
+extraction method above instead, RMSE 0.12m) and 2013 (a screenshot
+added to the property folder after the rest of this section's work was
+already live - matched cleanly against 2011, the closest year in the
+seed pool, RMSE 0.03m) - both confirmed via `plot_overlay.py` and
+pushed. 151/39 Etnedal is now the fifth fully-fitted property, all 14
+of its years (1958-2025) correctly georeferenced.
+
 ## Per-property output folder
 
 Every script that writes files takes `--kommune`/`--gnr`/`--bnr` and
@@ -921,6 +1062,7 @@ confidently fit, `georeference_screenshot.py`'s manual `list-vertices`/
 | `download_images.py` | Needs a GeoID token (see "Blocker") - fetches one GeoTIFF per confirmed year via the proper WMS |
 | `auto_gcp.py` | **Start here** - georeferences a batch of screenshots automatically (DP alignment + bbox seeds, refined by ICP); no subcommand |
 | `georeference_screenshot.py` | Manual fallback for years `auto_gcp.py` can't fit - georeferences one screenshot from human-identified GCPs; **subcommand-based** (`list-vertices` / `pick` / `fit`) |
+| `refit_from_reference.py` | Fallback for years `auto_gcp.py` fits *confidently but wrong* across most of a property - re-fits each year by matching it against an already-good year's photo instead of the boundary-color contour; see "When `auto_gcp.py` is confidently wrong" below |
 | `plot_overlay.py` | Plots a georeferenced photo with the live cadastral boundary overlaid; batch mode processes every already-fitted year in one go |
 | `generate_report.py` | Builds a Word report (A4, one overlay figure per fitted year) - see "Generating the Word report" below |
 | `generate_mbtiles.py` | Packages each fitted year into an offline map-tile file for the Android app - see "Viewing on Android" below |
